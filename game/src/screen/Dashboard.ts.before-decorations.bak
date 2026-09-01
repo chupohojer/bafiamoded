@@ -1,0 +1,1106 @@
+import fs from "../../../core/src/fs/fs";
+import App from "../App";
+import ConfirmBox from "../dialog/ConfirmBox";
+import ProfileInfo from "../dialog/ProfileInfo";
+import PromptBox from "../dialog/PromptBox";
+import PacketDataKeys from "../../../core/src/PacketDataKeys";
+import { getAvatarImg, getBackgroundImg, getDefaultAvatar, getTexture } from "../utils/Resources";
+import GlobalChat from "./GlobalChat";
+import Rooms from "./Rooms";
+import Ratings from "./Ratings";
+import Screen from "./Screen";
+
+import { isMobile } from "../../../core/src/utils/mobile";
+import Friends from "./Friends";
+import MessageBox from "../dialog/MessageBox";
+import Settings from "./Settings";
+import Box from "../dialog/Box";
+import { Profile } from "../../../launcher/src/enums";
+import { History } from "./History";
+// @ts-ignore
+import Matchmaking from "./Matchmaking";
+import { createElement } from "../../../core/src/utils/DOM";
+import Backpack from "./Backpack";
+import Shop from "./Shop";
+
+function pngToJpgBase64(file: File, quality = 0.9): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if(file.type != 'image/png') {
+      reject(new Error('Файл не PNG'));
+      return;
+    }
+
+    const img = new Image();
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      img.src = reader.result as string;
+    };
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+
+      const ctx = canvas.getContext('2d');
+      if(!ctx) {
+        reject(new Error('Canvas недоступен'));
+        return;
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.drawImage(img, 0, 0);
+
+      const jpgBase64 = canvas.toDataURL('image/jpeg', quality);
+      resolve(jpgBase64);
+    };
+
+    img.onerror = () => reject(new Error('Ошибка загрузки изображения'));
+    reader.onerror = () => reject(new Error('Ошибка чтения файла'));
+
+    reader.readAsDataURL(file);
+  });
+}
+
+export default class Dashboard extends Screen {
+  constructor(){
+    super('Dashboard');
+
+    App.title = 'Меню';
+
+this.element.style.height = '100dvh';
+this.element.style.maxHeight = '100dvh';
+this.element.style.overflow = 'hidden';
+this.element.style.boxSizing = 'border-box';
+
+    (async()=> this.element.style.background = `url(${await getBackgroundImg('menu3')}) 0% 0% / cover`)();
+
+    const header = document.createElement('div');
+    header.className = 'header';
+    this.element.appendChild(header);
+    const logo = document.createElement('label');
+    logo.textContent = 'Мафия онлайн';
+    header.appendChild(logo);
+
+    this.on('back', () => App.destroy())
+
+    this.init();
+  }
+  async init(){
+    let changedAvatar = false;
+    let competitiveScore = 0;
+
+const div = createElement('div', {
+  css: {
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '14px',
+    textAlign: 'center',
+    fontSize: 'smaller'
+  }
+});
+
+this.element.appendChild(div);
+
+
+/* ================================
+   ОБНОВЛЕНИЕ ДАННЫХ ПРОФИЛЯ
+================================ */
+
+function updateInfo() {
+  nick.textContent = App.user.username;
+
+  getTexture(`rank/rank${Math.round(App.user.level / 2)}_36.png`)
+    .then(e => rankImg.src = e);
+
+  getAvatarImg({
+    [PacketDataKeys.PLAYER_OBJECT_ID]: App.user.playerObjectId,
+    [PacketDataKeys.PHOTO]: App.user.photo,
+  }).then(e => {
+    if(changedAvatar) return;
+
+    changedAvatar = true;
+    avatar.src = e;
+  });
+
+  rankLvl.textContent = `${App.user.level}`;
+
+  const experience = Number(App.user.experience) || 0;
+  const nextExperience = Number(App.user.nextLevelExperience) || 1;
+
+  const percent = Math.max(
+    0,
+    Math.min(100, (experience / nextExperience) * 100)
+  );
+
+  xpFill.style.width = `${percent}%`;
+
+  rankLvl2.textContent =
+    `${App.user.experience} / ${App.user.nextLevelExperience}`;
+
+  trophyValue.textContent = `${competitiveScore}`;
+  silverCoinsValue.textContent = `${App.user.sliverCoins}`;
+  goldCoinsValue.textContent = `${App.user.goldCoins}`;
+}
+
+
+/* ================================
+   УРОВЕНЬ + ПОЛОСКА ОПЫТА
+================================ */
+
+const rankEl = createElement('div', {
+  css: {
+    display: 'flex',
+    width: '100%',
+    boxSizing: 'border-box',
+    alignItems: 'center',
+    gap: '7px',
+    marginBottom: '18px'
+  },
+  appendTo: div
+});
+
+const rankImg = createElement('img', {
+  width: 30,
+  height: 30,
+  appendTo: rankEl
+});
+
+const rankLvl = createElement('span', {
+  css: {
+    fontSize: '23px',
+    fontWeight: 'bold'
+  },
+  appendTo: rankEl
+});
+
+const xpTrack = createElement('div', {
+  css: {
+    flex: '1',
+    height: '20px',
+    position: 'relative',
+    background: 'rgba(255,255,255,0.45)',
+    border: '2px solid rgba(70,70,70,0.5)',
+    borderRadius: '12px',
+    overflow: 'hidden'
+  },
+  appendTo: rankEl
+});
+
+const xpFill = createElement('div', {
+  css: {
+    position: 'absolute',
+    left: '0',
+    top: '0',
+    height: '100%',
+    width: '0%',
+    background: '#d93d47',
+    borderRadius: '10px',
+    transition: 'width 0.25s'
+  },
+  appendTo: xpTrack
+});
+
+const rankLvl2 = createElement('span', {
+  css: {
+    position: 'absolute',
+    left: '0',
+    right: '0',
+    top: '0',
+    height: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: '17px',
+    fontWeight: 'bold',
+    color: 'white',
+    textShadow: '0 1px 2px #555',
+    zIndex: '2'
+  },
+  appendTo: xpTrack
+});
+
+
+/* ================================
+   ПРОФИЛЬ
+================================ */
+
+const profileArea = createElement('div', {
+  css: {
+    display: 'grid',
+    gridTemplateColumns: isMobile()
+  ? '90px minmax(120px, 1fr) 90px'
+  : '120px 1fr 120px',
+    width: '100%',
+    minHeight: '190px',
+    alignItems: 'center',
+    gap: isMobile() ? '4px' : '10px',
+    marginBottom: '25px'
+  },
+  appendTo: div
+});
+
+
+/* -------- Левая сторона -------- */
+
+const leftProfile = createElement('div', {
+  css: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '45px'
+  },
+  appendTo: profileArea
+});
+
+const trophyBox = createElement('div', {
+  css: {
+    minWidth: '75px',
+    padding: '8px 10px',
+    background: 'rgba(210,210,210,0.65)',
+    borderRadius: '12px',
+    color: '#111',
+    fontSize: '21px',
+    fontWeight: 'bold',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px'
+  },
+  appendTo: leftProfile
+});
+
+const trophyIcon = createElement('span', {
+  appendTo: trophyBox
+});
+
+trophyIcon.innerHTML = `
+  <svg width="28" height="28" viewBox="0 0 24 24"
+       fill="none" stroke="#9b6a00" stroke-width="1.5"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path fill="#f5c542" d="M7 3h10v6a5 5 0 0 1-10 0V3Z"/>
+    <path d="M7 5H4v2a3 3 0 0 0 3 3"/>
+    <path d="M17 5h3v2a3 3 0 0 1-3 3"/>
+    <path d="M12 14v4"/>
+    <path d="M8 21h8"/>
+    <path d="M9 18h6"/>
+  </svg>
+`;
+
+trophyIcon.style.display = 'flex';
+trophyIcon.style.alignItems = 'center';
+
+const trophyValue = createElement('span', {
+  text: '0',
+  appendTo: trophyBox
+});
+
+const btnBackpackTop = createElement('button', {
+  text: '🎒 Рюкзак',
+  css: {
+    width: isMobile() ? '90px' : '105px',
+    minHeight: isMobile() ? '52px' : '58px',
+    fontSize: isMobile() ? '15px' : '17px',
+    background: '#d93d47',
+    color: 'white'
+  },
+  appendTo: leftProfile
+});
+
+btnBackpackTop.onclick = () => App.screen = new Backpack();
+
+
+/* -------- Центр: аватар -------- */
+
+const centerProfile = createElement('div', {
+  css: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  appendTo: profileArea
+});
+
+const avatarWrap = createElement('div', {
+  css: {
+    position: 'relative',
+    width: isMobile() ? '115px' : '130px',
+    height: isMobile() ? '115px' : '130px'
+  },
+  appendTo: centerProfile
+});
+
+const avatar = createElement('img', {
+  css: {
+    width: isMobile() ? '115px' : '130px',
+    height: isMobile() ? '115px' : '130px',
+    objectFit: 'cover',
+    borderRadius: '100%',
+    cursor: 'pointer'
+  },
+  appendTo: avatarWrap
+});
+
+const editAvatar = createElement('button', {
+  text: '✎',
+  css: {
+    position: 'absolute',
+    width: '38px',
+    height: '38px',
+    left: '-8px',
+    bottom: '-5px',
+    padding: '0',
+    fontSize: '22px',
+    background: '#c8c8c8',
+    color: '#333',
+    border: '1px solid #555',
+    borderRadius: '9px'
+  },
+  appendTo: avatarWrap
+});
+
+editAvatar.onclick = () => avatar.click();
+
+const nick = createElement('span', {
+  css: {
+    marginTop: '12px',
+    display: 'block',
+    color: '#111',
+    fontSize: '23px',
+    fontWeight: 'bold'
+  },
+  appendTo: centerProfile
+});
+
+
+/* -------- Правая сторона -------- */
+
+const rightProfile = createElement('div', {
+  css: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '10px'
+  },
+  appendTo: profileArea
+});
+
+const silverBox = createElement('div', {
+  css: {
+    width: isMobile() ? '82px' : '100px',
+    padding: '8px',
+    background: 'rgba(190,190,190,0.65)',
+    color: '#111',
+    borderRadius: '12px',
+    fontSize: isMobile() ? '16px' : '18px',
+    fontWeight: 'bold',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px'
+  },
+  appendTo: rightProfile
+});
+
+const silverCoinsValue = createElement('span', {
+  text: '0',
+  appendTo: silverBox
+});
+
+const silverIcon = createElement('span', {
+  appendTo: silverBox
+});
+
+silverIcon.innerHTML = `
+  <svg width="24" height="24" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10"
+            fill="#e5e8eb"
+            stroke="#9ca4ab"
+            stroke-width="2"/>
+    <circle cx="12" cy="12" r="6.5"
+            fill="none"
+            stroke="#bcc3c9"
+            stroke-width="1.5"/>
+  </svg>
+`;
+
+silverIcon.style.display = 'flex';
+silverIcon.style.alignItems = 'center';
+
+const goldBox = createElement('div', {
+  css: {
+    width: isMobile() ? '82px' : '100px',
+    padding: '8px',
+    background: 'rgba(190,190,190,0.65)',
+    color: '#111',
+    borderRadius: '12px',
+    fontSize: isMobile() ? '16px' : '18px',
+    fontWeight: 'bold',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px'
+  },
+  appendTo: rightProfile
+});
+
+const goldCoinsValue = createElement('span', {
+  text: '0',
+  appendTo: goldBox
+});
+
+const goldIcon = createElement('span', {
+  appendTo: goldBox
+});
+
+goldIcon.innerHTML = `
+  <svg width="24" height="24" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10"
+            fill="#ffd438"
+            stroke="#c99500"
+            stroke-width="2"/>
+    <circle cx="12" cy="12" r="6.5"
+            fill="none"
+            stroke="#e4ad00"
+            stroke-width="1.5"/>
+  </svg>
+`;
+
+goldIcon.style.display = 'flex';
+goldIcon.style.alignItems = 'center';
+
+
+/* Настройки + профиль */
+
+const profileButtons = createElement('div', {
+  css: {
+    display: 'flex',
+    gap: '8px',
+    marginTop: '16px'
+  },
+  appendTo: rightProfile
+});
+
+const btnSettings = createElement('button', {
+  text: '⚙',
+  css: {
+    width: '50px',
+    height: '50px',
+    padding: '0',
+    fontSize: '27px',
+    background: '#c8c8c8'
+  },
+  appendTo: profileButtons
+});
+
+btnSettings.onclick = () => App.screen = new Settings();
+
+const btnProfile = createElement('button', {
+  text: '👤',
+  css: {
+    width: '50px',
+    height: '50px',
+    padding: '0',
+    fontSize: '24px',
+    background: '#d93d47'
+  },
+  appendTo: profileButtons
+});
+
+btnProfile.onclick = () =>
+  ProfileInfo(App.user.playerObjectId);
+
+    avatar.onclick = async() => {
+      App.server.send(PacketDataKeys.USER_GET_DEFAULT_PHOTOS, {});
+      const data = await App.server.awaitPacket(PacketDataKeys.USER_DEFAULT_PHOTOS);
+      const photos = data[PacketDataKeys.USER_DEFAULT_PHOTOS][PacketDataKeys.USER_DEFAULT_PHOTOS_IDS] as string[];
+      photos.sort((a, b) => {
+        const [ta, na] = [a[0], Number(a.slice(1))];
+        const [tb, nb] = [b[0], Number(b.slice(1))];
+
+        if(ta !== tb) return ta === 'm' ? -1 : 1;
+        return na - nb;
+      });
+
+      const box = new Box({ title: 'ФОТО ПРОФИЛЯ', width: 325, height: 270, canCloseAnywhere: true });
+      const e = createElement('div', {
+        css: {
+          display: 'flex',
+          padding: '5px',
+          alignItems: 'center',
+          flexDirection: 'column',
+          gap: '3px'
+        }
+      });
+      box.content.appendChild(e);
+      const btnDeleteAva = document.createElement('button');
+      btnDeleteAva.textContent = 'Удалить аватарку';
+      btnDeleteAva.onclick = async() => {
+        if(!await ConfirmBox('Вы уверены, что хотите удалить фото профиля?', { btnYes: 'Удалить' })) return;
+        
+        App.server.send(PacketDataKeys.REMOVE_PHOTO, {
+          [PacketDataKeys.USER_OBJECT_ID]: App.user.objectId,
+          // [PacketDataKeys.PLAYER_OBJECT_ID]: App.user.playerObjectId,
+          [PacketDataKeys.TOKEN]: App.user.token,
+        });
+
+        const data = await App.server.awaitPacket([
+          PacketDataKeys.DASHBOARD,
+          PacketDataKeys.REMOVE_PHOTO
+        ]);
+
+        delete App.resources[`avatars_${App.user.objectId}`];
+        App.user.photo = data ? data.db && data.db?.du?.ph || '1' : '1';
+        await box.close();
+        App.screen = new Dashboard();
+      }
+      e.appendChild(btnDeleteAva);
+      const btnUpload = document.createElement('button');
+      btnUpload.textContent = 'Загрузить';
+      btnUpload.onclick = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/png, image/jpeg';
+        input.style.display = 'none';
+
+        input.onchange = async() => {
+          const file = input.files?.[0];
+          if(!file) return;
+
+          if(!['image/png', 'image/jpeg'].includes(file.type)) {
+            MessageBox('Допустимы только PNG и JPG');
+            return;
+          }
+
+          let base64: string;
+
+          try {
+            if(file.type == 'image/png') {
+              const jpgDataUrl = await pngToJpgBase64(file);
+              base64 = jpgDataUrl.split(',')[1];
+            } else {
+              base64 = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve((reader.result as string).split(',')[1]);
+                reader.onerror = () => reject();
+                reader.readAsDataURL(file);
+              });
+            }
+          } catch(e) {
+            MessageBox(`Ошибка обработки изображения..\n${e}`);
+            return;
+          }
+
+          App.server.send(PacketDataKeys.UPLOAD_PHOTO, {
+            [PacketDataKeys.USER_OBJECT_ID]: App.user.objectId,
+            // [PacketDataKeys.PLAYER_OBJECT_ID]: App.user.playerObjectId,
+            [PacketDataKeys.TOKEN]: App.user.token,
+            [PacketDataKeys.FILE]: base64
+          });
+
+          const data = await App.server.awaitPacket([
+            PacketDataKeys.DASHBOARD,
+            PacketDataKeys.WRONG_FILE_TYPE
+          ]).catch(e => false);
+
+          if(data[PacketDataKeys.TYPE] == PacketDataKeys.WRONG_FILE_TYPE) {
+            MessageBox('Допустимы только PNG и JPG');
+            return;
+          }
+          if(data === false){
+            App.panic(App.server.lastPacket);
+            return;
+          }
+
+          delete App.resources[`avatars_${App.user.objectId}`];
+          App.user.photo = data ? data.db && data.db?.du?.ph || '1' : '1';
+          await box.close();
+          App.screen = new Dashboard();
+        }
+
+        document.body.appendChild(input);
+        input.click();
+        input.remove();
+      }
+      e.appendChild(btnUpload);
+      const orList = createElement('span', {
+        css: {
+          padding: '10px',
+          color: 'black'
+        },
+        text: 'или выберите из списка:'
+      });
+      e.appendChild(orList);
+      const images = createElement('div', {
+        css: {
+          display: 'flex',
+          flexWrap: 'wrap',
+          width: '300px',
+          height: '100px',
+          background: '#969696',
+          borderRadius: '10px',
+          overflowY: 'overlay',
+          padding: '5px'
+        }
+      });
+      for(const p of photos){
+        const img = document.createElement('img');
+        img.src = `https://dottap.com/mafia/profile_photo/default/${p}.jpg`;
+        img.width = img.height = 50;
+        img.style.borderRadius = '100%';
+        img.style.padding = '2px';
+        img.onmousedown = e => e.preventDefault();
+        img.onclick = async() => {
+          App.server.send('ussdph', {
+            [PacketDataKeys.PHOTO]: p,
+            [PacketDataKeys.PLAYER_OBJECT_ID]: App.user.playerObjectId,
+            [PacketDataKeys.USER_OBJECT_ID]: App.user.objectId,
+            [PacketDataKeys.TOKEN]: App.user.token
+          });
+          await App.server.awaitPacket('ussdph');
+          delete App.resources[`avatars_${App.user.objectId}`];
+          App.user.photo = p;
+          avatar.src = img.src;
+        }
+        images.appendChild(img);
+      }
+      e.appendChild(images);
+
+      await box.wait('destroy');
+    }
+ avatar.onmousedown = e => e.preventDefault();
+
+nick.textContent = App.user.username;
+
+if(App.settings.data.hideUsername) {
+  nick.style.filter = 'blur(5px)';
+}
+
+ /* ================================
+   ГЛАВНОЕ МЕНЮ
+================================ */
+
+const menu = createElement('div', {
+  css: {
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    boxSizing: 'border-box',
+    marginTop: '35px'
+  },
+  appendTo: div
+});
+
+
+/* Общий стиль красных кнопок */
+
+function styleRedButton(button: HTMLButtonElement) {
+  button.style.background = '#d93d47';
+  button.style.color = 'white';
+  button.style.border = '1px solid #333';
+  button.style.borderRadius = '10px';
+  button.style.height = isMobile() ? '46px' : '48px';
+  button.style.fontSize = isMobile() ? '17px' : '20px';
+  button.style.fontWeight = '500';
+  button.style.cursor = 'pointer';
+  button.style.whiteSpace = 'nowrap';
+button.style.boxSizing = 'border-box';
+button.style.padding = isMobile() ? '0 10px' : '0 16px';
+}
+
+
+/* ================================
+   КОМНАТЫ
+================================ */
+
+const btnRooms = document.createElement('button');
+
+const roomsIcon = document.createElement('span');
+roomsIcon.style.width = '24px';
+roomsIcon.style.height = '18px';
+roomsIcon.style.display = 'flex';
+roomsIcon.style.flexDirection = 'column';
+roomsIcon.style.justifyContent = 'space-between';
+
+for(let i = 0; i < 3; i++) {
+  const line = document.createElement('span');
+  line.style.display = 'block';
+  line.style.width = '24px';
+  line.style.height = '3px';
+  line.style.background = 'white';
+  line.style.borderRadius = '2px';
+  roomsIcon.appendChild(line);
+}
+
+const roomsText = document.createElement('span');
+roomsText.textContent = 'Комнаты';
+
+btnRooms.appendChild(roomsIcon);
+btnRooms.appendChild(roomsText);
+
+styleRedButton(btnRooms);
+
+btnRooms.style.display = 'flex';
+btnRooms.style.alignItems = 'center';
+btnRooms.style.justifyContent = 'center';
+btnRooms.style.gap = '18px';
+btnRooms.style.width = isMobile() ? '52%' : '58%';
+btnRooms.style.fontWeight = 'bold';
+
+btnRooms.onclick = () => {
+  App.screen = new Rooms();
+};
+
+menu.appendChild(btnRooms);
+
+
+/* ================================
+   СОРЕВНОВАТЕЛЬНЫЙ
+================================ */
+
+const btnMM = document.createElement('button');
+
+const mmIcon = document.createElement('span');
+mmIcon.innerHTML = `
+  <svg width="28" height="28" viewBox="0 0 24 24"
+       fill="none" stroke="white" stroke-width="2.2"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 21h8"/>
+    <path d="M12 17v4"/>
+    <path d="M7 4h10v5a5 5 0 0 1-10 0V4Z"/>
+    <path d="M7 6H4a2 2 0 0 0 2 4h1"/>
+    <path d="M17 6h3a2 2 0 0 1-2 4h-1"/>
+  </svg>
+`;
+
+mmIcon.style.display = 'flex';
+mmIcon.style.alignItems = 'center';
+
+const mmText = document.createElement('span');
+mmText.textContent = 'Соревновательный';
+
+btnMM.appendChild(mmIcon);
+btnMM.appendChild(mmText);
+
+styleRedButton(btnMM);
+
+btnMM.style.display = 'flex';
+btnMM.style.alignItems = 'center';
+btnMM.style.justifyContent = 'center';
+btnMM.style.gap = '10px';
+
+btnMM.style.width = isMobile() ? '52%' : '58%';
+btnMM.style.marginTop = '8px';
+btnMM.style.fontWeight = 'bold';
+
+btnMM.onclick = () => {
+  App.screen = new Matchmaking();
+};
+
+menu.appendChild(btnMM);
+
+
+/* Большой промежуток как в оригинале */
+
+const menuSpace1 = document.createElement('div');
+menuSpace1.style.height = '85px';
+menu.appendChild(menuSpace1);
+
+
+/* ================================
+   ЧАТ
+================================ */
+
+const btnGlobalChat = document.createElement('button');
+
+const chatIcon = document.createElement('img');
+chatIcon.width = 28;
+chatIcon.height = 22;
+chatIcon.style.objectFit = 'contain';
+
+getTexture('ui/0Y.png').then(e => chatIcon.src = e);
+
+const chatText = document.createElement('span');
+chatText.textContent = 'Чат';
+
+btnGlobalChat.appendChild(chatIcon);
+btnGlobalChat.appendChild(chatText);
+
+styleRedButton(btnGlobalChat);
+
+btnGlobalChat.style.display = 'flex';
+btnGlobalChat.style.alignItems = 'center';
+btnGlobalChat.style.justifyContent = 'center';
+btnGlobalChat.style.gap = '12px';
+
+btnGlobalChat.style.width = isMobile() ? '38%' : '44%';
+btnGlobalChat.style.fontWeight = 'bold';
+
+btnGlobalChat.onclick = () => {
+  App.screen = new GlobalChat();
+};
+
+menu.appendChild(btnGlobalChat);
+
+
+/* ================================
+   ДРУЗЬЯ
+================================ */
+
+const btnFriends = document.createElement('button');
+
+const friendsIcon = document.createElement('img');
+friendsIcon.width = 28;
+friendsIcon.height = 28;
+friendsIcon.style.objectFit = 'contain';
+
+getTexture('ui/-8.png').then(e => friendsIcon.src = e);
+
+const friendsText = document.createElement('span');
+friendsText.textContent = 'Друзья';
+
+btnFriends.appendChild(friendsIcon);
+btnFriends.appendChild(friendsText);
+
+styleRedButton(btnFriends);
+
+btnFriends.style.display = 'flex';
+btnFriends.style.alignItems = 'center';
+btnFriends.style.justifyContent = 'center';
+btnFriends.style.gap = '12px';
+
+btnFriends.style.width = isMobile() ? '38%' : '44%';
+btnFriends.style.marginTop = '8px';
+btnFriends.style.fontWeight = 'bold';
+
+btnFriends.onclick = () => {
+  App.screen = new Friends();
+};
+
+menu.appendChild(btnFriends);
+
+
+/* Второй большой промежуток */
+
+const menuSpace2 = document.createElement('div');
+menuSpace2.style.height = '100px';
+menu.appendChild(menuSpace2);
+
+
+/* ================================
+   НИЖНИЙ БЛОК
+================================ */
+
+const bottomMenu = createElement('div', {
+  css: {
+    width: '78%',
+    display: 'grid',
+    gridTemplateColumns: '1fr 1.15fr',
+    gap: '10px'
+  },
+  appendTo: menu
+});
+
+
+/* Левая колонка */
+
+const bottomLeft = createElement('div', {
+  css: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px'
+  },
+  appendTo: bottomMenu
+});
+
+
+/* РЕЙТИНГИ */
+
+const btnRatings = document.createElement('button');
+btnRatings.textContent = 'Рейтинги';
+
+styleRedButton(btnRatings);
+
+btnRatings.style.width = '100%';
+btnRatings.style.fontWeight = 'bold';
+
+btnRatings.onclick = () => {
+  App.screen = new Ratings();
+};
+
+bottomLeft.appendChild(btnRatings);
+
+
+/* ПРАВИЛА */
+
+const btnRules = document.createElement('button');
+btnRules.textContent = 'Правила';
+
+styleRedButton(btnRules);
+
+btnRules.style.width = '100%';
+btnRules.style.fontWeight = 'bold';
+
+btnRules.onclick = () => {
+  MessageBox('Правила пока не реализованы');
+};
+
+bottomLeft.appendChild(btnRules);
+
+
+/* ================================
+   МАГАЗИН
+================================ */
+
+const btnShop = document.createElement('button');
+
+btnShop.innerHTML = '▣ &nbsp; Магазин';
+
+btnShop.style.width = '100%';
+btnShop.style.height = '104px';
+btnShop.style.background = '#a6ba70';
+btnShop.style.color = '#111';
+btnShop.style.border = '1px solid #333';
+btnShop.style.borderRadius = '10px';
+btnShop.style.fontSize = '22px';
+btnShop.style.fontWeight = 'bold';
+btnShop.style.cursor = 'pointer';
+
+btnShop.onclick = () => {
+  App.screen = new Shop();
+};
+
+bottomMenu.appendChild(btnShop);
+
+
+
+    // const btnShop = document.createElement('button');
+    // btnShop.textContent = 'Магазин';
+    // btnShop.style.width = '60%';
+    // btnShop.style.margin = '3px';
+    // btnShop.disabled = true;
+    // div.appendChild(btnShop);
+    // div.appendChild(document.createElement('br'));
+
+    // const btnRules = document.createElement('button');
+    // btnRules.textContent = 'Правила';
+    // btnRules.style.width = '60%'
+    // btnRules.style.margin = '3px'
+    // btnRules.disabled = true;
+    // div.appendChild(btnRules);
+    // div.appendChild(document.createElement('br'));
+
+    
+    
+    updateInfo();
+
+    App.server.send(PacketDataKeys.ADD_CLIENT_TO_DASHBOARD, {
+      [PacketDataKeys.USER_OBJECT_ID]: App.user.objectId,
+      [PacketDataKeys.TOKEN]: App.user.token
+    });
+    const data = await App.server.awaitPacket(PacketDataKeys.DASHBOARD);
+    
+    const db = data[PacketDataKeys.DASHBOARD];
+    const du = db[PacketDataKeys.DASHBOARD_USER];
+    App.user.update(du);
+
+    competitiveScore =
+  Number(du[PacketDataKeys.MATCH_MAKING_SCORE]) || 0;
+  
+    App.user.goldCoins = db[PacketDataKeys.USER_ACCOUNT_COINS][PacketDataKeys.GOLD_COINS];
+    App.user.sliverCoins = db[PacketDataKeys.USER_ACCOUNT_COINS][PacketDataKeys.SILVER_COINS];
+    
+    updateInfo();
+
+    if(du[PacketDataKeys.USERNAME] == '') (async () => {
+      async function send() {
+        const uu = await PromptBox(`Для игры и общения с другими игроками у вас должен быть установлен Никнэйм`);
+
+        App.server.send(PacketDataKeys.USERNAME_SET, {
+          [PacketDataKeys.USER_OBJECT_ID]: App.user.objectId,
+          [PacketDataKeys.TOKEN]: App.user.token,
+          [PacketDataKeys.USERNAME]: uu
+        });
+      }
+
+      this.on('message', async json => {
+        if(json[PacketDataKeys.TYPE] == PacketDataKeys.USERNAME_HAS_WRONG_SYMBOLS) {
+          await MessageBox(`Для никнейма вы можете использовать только 0-9 а-Я a-Z символы`);
+          send();
+        } else if(json[PacketDataKeys.TYPE] == PacketDataKeys.USERNAME_IS_EXISTS) {
+          await MessageBox(`Данный никнейм уже зарегистрирован`);
+          await send()
+        } else if(json[PacketDataKeys.TYPE] == PacketDataKeys.USERNAME_IS_OUT_OF_BOUNDS) {
+          await MessageBox(`Никнейм слишком короткий или длинный.\nНикнейм должен состоять из 3-12 символы`);
+          await send()
+        } else if(json[PacketDataKeys.TYPE] == PacketDataKeys.USERNAME_IS_EMPTY) {
+          await MessageBox(`Никнейм не может быть пустым`);
+          await send()
+        } else if(json[PacketDataKeys.TYPE] == PacketDataKeys.USERNAME_SET) {
+          const profiles = JSON.parse(await fs.readFile(App.getPathProfiles())) as Profile[];
+
+          const acc = profiles.find(e => e.name == '');
+          if(!acc) {
+            alert(`Ошибка... Отправь эту ошибку разработчику\n\n ${JSON.stringify(profiles)}`);
+            return;
+          }
+          acc.name = json[PacketDataKeys.USERNAME];
+
+          await fs.writeFile(App.getPathProfiles(), JSON.stringify(profiles));
+          App.screen = new Dashboard();
+        } else if(json[PacketDataKeys.TYPE] == PacketDataKeys.SIGN_IN_ERROR) {
+          await MessageBox(`Что-то не пошло так\nКод ошибки: ${json[PacketDataKeys.ERROR]}`);
+          await send();
+        }
+      });
+
+      send();
+    })();
+
+    const requests = Number(db[PacketDataKeys.FRIENDSHIP_REQUESTS]);
+    const newMessages = Number(db[PacketDataKeys.NEW_MESSAGES]);
+
+    // пиздец говнокод, похуй
+    if(newMessages > 0 || requests > 0){
+      btnFriends.innerHTML = '';
+      const div = document.createElement('div');
+      div.textContent = `Друзья`;
+      btnFriends.appendChild(div);
+      {
+        const div1 = document.createElement('div');
+        div1.style.display = 'flex';
+        div1.style.alignItems = 'center';
+        div1.textContent = newMessages > 0 ? newMessages + '' : '';
+        if(newMessages > 0) {
+          const img = document.createElement('img');
+          img.width = 18;
+          img.height = 14;
+          img.style.marginLeft = '5px';
+          getTexture('ui/0Y.png').then(e => img.src = e);
+          div1.appendChild(img);
+        }
+        btnFriends.appendChild(div1);
+        {
+          const e = document.createElement('div');
+          e.style.display = 'flex';
+          e.style.alignItems = 'center';
+          e.style.justifyContent = 'flex-end';
+          e.textContent = requests > 0 ? requests + '' : '';
+          if(requests > 0) {
+            const img = document.createElement('img');
+            img.width = 18;
+            img.height = 18;
+            img.style.marginLeft = '5px';
+            getTexture('ui/-8.png').then(e => img.src = e);
+            e.appendChild(img);
+          }
+          div1.appendChild(e);
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "Бафия Онлайн",
+  "short_name": "Бафия",
+  "description": "Браузерная версия Мафии онлайн",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "./splash_screens/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./splash_screens/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "./screenshots/mobile.png",
+      "sizes": "394x848",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Мобильная версия Бафии"
+    },
+    {
+      "src": "./screenshots/desktop.png",
+      "sizes": "893x960",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Десктопная версия Бафии"
+    }
+  ]
+}

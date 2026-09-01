@@ -1,0 +1,28 @@
+{
+  "dependencies": {
+    "@dweb-browser/zstd-wasm": "^1.2.1",
+    "@types/bun": "^1.3.5",
+    "esbuild": "^0.27.2",
+    "lottie-web": "^5.13.0",
+    "tslog": "^4.10.2",
+    "ws": "^8.21.0"
+  },
+  "scripts": {
+    "start": "bun .",
+    "a": "esbuild game/src/index.ts --bundle --outfile=game/image/main.js",
+    "aM": "esbuild game/src/index.ts --bundle --minify --outfile=game/image/main.js",
+    "b": "esbuild launcher/src/index.ts --bundle --serve=80 --servedir=run --watch --outfile=run/index.js",
+    "c": "esbuild game/src/index.ts --bundle --minify --outfile=game/image/main.js && bun run build",
+    "e": "esbuild launcher/src/index.ts --bundle --outfile=run/index.js",
+    "cb": "bun run c && bun run b",
+    "g": "bun build game/src/index.ts --bundle --minify --outfile=game/image/main.js",
+    "l": "bun build launcher/src/index.ts --bundle --outfile=run/index.js",
+    "s": "bun run g && bun run l && bun run build && bun ./server/index.ts",
+    "nbuildgame": "esbuild game/src/index.ts --bundle --minify --outfile=game/image/main.js && pnpm run nbuild",
+    "buildtest": "esbuild build/generateImage.ts --bundle --minify --platform=node --outfile=build/generateImage.js",
+    "buildG": "pnpm run aM && pnpm run nbuild && pnpm run e",
+    "devLauncher": "pnpm run b",
+    "build": "bun build/generateImage.ts",
+    "dev": "bun serveHot"
+  }
+}

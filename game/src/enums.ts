@@ -1,0 +1,85 @@
+export enum Sex {
+  WEN = 0,
+  WOMEN = 1
+}
+
+export enum Role {
+  CIVILIAN = 1,
+  DOCTOR = 2,
+  SHERIFF = 3,
+  MAFIA = 4,
+  LOVER = 5,
+  TERRORIST = 6,
+  JOURNALIST = 7,
+  BODYGUARD = 8,
+  BARMAN = 9,
+  SPY = 10,
+  INFORMER = 11
+}
+
+export const Roles = {
+  CIVILIAN: 1,
+  DOCTOR: 2,
+  SHERIFF: 3,
+  MAFIA: 4,
+  LOVER: 5,
+  TERRORIST: 6,
+  JOURNALIST: 7,
+  BODYGUARD: 8,
+  BARMAN: 9,
+  SPY: 10,
+  INFORMER: 11
+}
+
+export const RuRoles = [`Овощ`,`Доктор`,`Шериф`,`Мафия`,`Любовница`,`Террорист`,`Журналист`,`Телохранитель`,`Бармен`,`Шпион`,`Информатор`];
+
+export const MessageTypes = {
+  MAIN_TEXT: 1,
+  USER_HAS_ENTERED: 2,
+  USER_HAS_LEFT: 3,
+  GAME_HAS_STARTED: 4,
+  NIGHT_COME_MAFIA_IN_CHAT: 5,
+  NIGHT_MAFIA_CHOOSE_VICTIM: 6,
+  DAY_COME_EVERYONE_IN_CHAT: 7,
+  DAY_CIVILIANS_VOTING: 8,
+  VOTES_FOR: 9,
+  MAIN_TEXT10: 10,
+  KILLED_PLAYER_MESSAGE: 11,
+  PLAYER_KILLED: 12,
+  VOTES_FOR13: 13,
+  NOBODY_KILLED: 14,
+  GAME_FINISHED_CIVILIANS_WON: 15,
+  GAME_FINISHED_MAFIA_WON: 16,
+  KILLED_USER_MESSAGE: 17,
+  TERRORIST_BOMBED: 18,
+  BREAKING_NEWS_PLAYING_THE_SAME_TEAM: 19,
+  BREAKING_NEWS_PLAYING_DIFFERENT_TEAMS: 20,
+  TERRORIST_BOMBED_USER_WAS_UNDER_GUARDIAN: 21,
+  GAME_FINISHED_IN_DRAW: 22,
+  STARTED_VOTING_TO_KICK_USER: 23,
+  KICK_VOTING_HAS_FINISHED: 24,
+  MAIN_TEXT25: 25,
+  VOTES_FOR26: 26,
+  GIVE_UP: 27
+}
+
+export enum MessageStyle {
+  NO_COLOR = 0,
+  GREY_COLOR = 1,
+  BLUE_COLOR = 2,
+  RED_COLOR = 3,
+  GREEN_COLOR = 4,
+  PURPLE_COLOR = 5,
+  YELLOW_COLOR = 6,
+  PINK_COLOR = 7
+}
+export const MessageStyles = {
+  NO_COLOR: 0,
+  GREY_COLOR: 1,
+  BLUE_COLOR: 2,
+  RED_COLOR: 3,
+  GREEN_COLOR: 4,
+  PURPLE_COLOR: 5,
+  YELLOW_COLOR: 6,
+  PINK_COLOR: 7
+}
