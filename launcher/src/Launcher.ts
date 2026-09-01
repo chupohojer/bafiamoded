@@ -160,7 +160,9 @@ export default class Launcher {
     // this.win.lock();
     for(const image of images){
       try {
-        await createScript({ src: `./bin/${image}.js` });
+        await createScript({
+          src: `./bin/${image}.js?v=${Date.now()}`
+        });
         await readImage('image_' + image, `/game/`, false, {
           startProcessFS(s) {
             size = s;
@@ -932,7 +934,9 @@ Telegram канал: <a href="https://t.me/bafiaonline">t.me/bafiaonline</a>`.re
     // try {
     //   mainScript = await fs.readFile(`/game/image.js`);
     // } catch {
-    await createScript({ src: `./bin/image.js` });
+    await createScript({
+      src: `./bin/image.js?v=${Date.now()}`
+    });
     // }
 
     if(profile && profile.userId && (this.options.profile != profile.userId)) {

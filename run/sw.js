@@ -1,9 +1,9 @@
-const CACHE_NAME = 'bafia-v2-notifications';
+const CACHE_NAME = 'bafia-v3-autoupdate';
 
 const ASSETS = [
   './manifest.json',
   './index.html',
-  './index.js',
+  './bin/index.js',
 ];
 
 self.addEventListener('install', (event) => {
@@ -29,10 +29,26 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  if(event.request.method !== 'GET')
+    return;
+
   event.respondWith(
-    fetch(event.request).catch(() => {
-      return caches.match(event.request);
-    })
+    fetch(event.request, { cache: 'no-cache' })
+      .catch(async() => {
+        const cached =
+          await caches.match(
+            event.request,
+            { ignoreSearch: true }
+          );
+
+        if(cached)
+          return cached;
+
+        if(event.request.mode === 'navigate')
+          return caches.match('./index.html');
+
+        throw new Error('Offline resource is not cached');
+      })
   );
 });
 
