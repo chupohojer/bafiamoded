@@ -44,82 +44,6 @@ self.addEventListener('activate', (event) => {
   A push notification must never change unread/read state.
 */
 
-const PUSH_DEBUG_CACHE =
-  'bafia-push-debug-v1';
-
-async function savePushDebugPayload(
-  payload,
-  parsed
-) {
-  try {
-    const cache =
-      await caches.open(
-        PUSH_DEBUG_CACHE
-      );
-
-    const receivedAt =
-      Date.now();
-
-    const url =
-      new URL(
-        `./__push_debug__/${receivedAt}-${Math.random().toString(36).slice(2)}`,
-        self.registration.scope
-      ).toString();
-
-    await cache.put(
-      url,
-      new Response(
-        JSON.stringify({
-          receivedAt,
-          payload,
-          parsed: {
-            title:
-              parsed?.title ?? '',
-            body:
-              parsed?.body ?? '',
-            friendship:
-              parsed?.friendship ?? '',
-            deeplinkUri:
-              parsed?.deeplinkUri ?? ''
-          }
-        }),
-        {
-          headers: {
-            'content-type':
-              'application/json; charset=utf-8'
-          }
-        }
-      )
-    );
-
-    /*
-      Keep the diagnostic tiny. This cache contains ONLY push payloads:
-      no Mafia auth token, no chat history, no user action.
-    */
-    const keys =
-      await cache.keys();
-
-    if(keys.length > 30) {
-      const overflow =
-        keys.length - 30;
-
-      for(
-        let index = 0;
-        index < overflow;
-        index++
-      ) {
-        await cache.delete(
-          keys[index]
-        );
-      }
-    }
-  } catch {
-    /*
-      Debug logging must never be allowed to break notification delivery.
-    */
-  }
-}
-
 function cleanText(value) {
   return String(
     value ??
@@ -326,7 +250,6 @@ function parsePushPayload(
     );
 
   return {
-    payload,
     data,
     title,
     body,
@@ -358,51 +281,40 @@ self.addEventListener(
           );
 
     event.waitUntil(
-      Promise.all([
-        /*
-          Pure observation only. This records exactly what FCM delivered so we
-          can diagnose the mysterious 5-message offset without touching chat.
-        */
-        savePushDebugPayload(
-          parsed.payload,
-          parsed
-        ),
+      self.registration.showNotification(
+        parsed.title,
+        {
+          body:
+            parsed.body,
+          icon:
+            './splash_screens/icon.png',
+          tag,
+          data: {
+            kind:
+              parsed.friendship
+                ? 'bafia-private-message'
+                : 'bafia-official-push',
 
-        self.registration.showNotification(
-          parsed.title,
-          {
-            body:
-              parsed.body,
-            icon:
-              './splash_screens/icon.png',
-            tag,
-            data: {
-              kind:
-                parsed.friendship
-                  ? 'bafia-private-message'
-                  : 'bafia-official-push',
+            friendship:
+              parsed.friendship ||
+              undefined,
 
-              friendship:
-                parsed.friendship ||
-                undefined,
+            deeplinkUri:
+              parsed.deeplinkUri
+                ? String(
+                    parsed.deeplinkUri
+                  )
+                : undefined,
 
-              deeplinkUri:
-                parsed.deeplinkUri
-                  ? String(
-                      parsed.deeplinkUri
-                    )
-                  : undefined,
-
-              /*
-                Kept only for click routing/debugging.
-                No background Mafia request is made from this payload.
-              */
-              raw:
-                parsed.data
-            }
+            /*
+              Kept only for click routing/debugging.
+              No background Mafia request is made from this payload.
+            */
+            raw:
+              parsed.data
           }
-        )
-      ])
+        }
+      )
     );
   }
 );
