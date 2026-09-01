@@ -83,6 +83,15 @@ export default class Server extends Events<ServerEvents> {
     0;
 
   /*
+    Keep the latest ordinary FRIENDSHIP_LIST snapshot around.
+    A notification deep-link only gives us the friendship id, while
+    PrivateChat also needs the peer player id + user object.
+  */
+  private latestFriendshipEntries:
+    any[] =
+      [];
+
+  /*
     Temporary diagnostic for Stage 2:
     try to obtain an FCM Web registration token for the SAME Firebase project
     used by the official Android client, then register it through the exact
@@ -360,6 +369,9 @@ export default class Server extends Events<ServerEvents> {
             entry
           )
       );
+
+    this.latestFriendshipEntries =
+      acceptedEntries;
 
     if(
       entries.length > 0 &&
@@ -989,6 +1001,305 @@ export default class Server extends Events<ServerEvents> {
           null;
       }
     }
+  }
+
+  private privateChatFriendshipFromDeeplink(
+    rawValue: unknown
+  ) {
+    const raw =
+      String(
+        rawValue ??
+        ''
+      ).trim();
+
+    if(!raw)
+      return '';
+
+    try {
+      /*
+        The official Android client parses deeplinkUri with Uri.getPathSegments()
+        and treats:
+          /private_chat/<friendshipObjectId>
+        as the private-chat route.
+      */
+      const url =
+        new URL(
+          raw,
+          window.location.origin
+        );
+
+      const segments =
+        url.pathname
+          .split('/')
+          .filter(Boolean)
+          .map(segment => {
+            try {
+              return decodeURIComponent(
+                segment
+              );
+            } catch {
+              return segment;
+            }
+          });
+
+      const privateChatIndex =
+        segments.findIndex(
+          segment =>
+            segment ===
+              'private_chat'
+        );
+
+      if(
+        privateChatIndex >= 0 &&
+        segments[
+          privateChatIndex + 1
+        ]
+      ) {
+        return String(
+          segments[
+            privateChatIndex + 1
+          ]
+        );
+      }
+    } catch {
+      /*
+        Keep a small non-URL fallback for unusual custom-scheme strings.
+      */
+    }
+
+    const match =
+      raw.match(
+        /(?:^|\/)private_chat\/([^/?#]+)/i
+      );
+
+    if(!match?.[1])
+      return '';
+
+    try {
+      return decodeURIComponent(
+        match[1]
+      );
+    } catch {
+      return match[1];
+    }
+  }
+
+  public async openPrivateChatFromNotification(
+    data: Record<string, any>
+  ) {
+    const deeplinkUri =
+      String(
+        data?.deeplinkUri ??
+        data?.raw?.deeplinkUri ??
+        ''
+      );
+
+    const friendshipFromDeeplink =
+      this.privateChatFriendshipFromDeeplink(
+        deeplinkUri
+      );
+
+    const targetFriendship =
+      String(
+        data?.friendship ??
+        data?.friendshipObjectId ??
+        friendshipFromDeeplink ??
+        ''
+      );
+
+    const targetPlayerObjectId =
+      String(
+        data?.playerObjectId ??
+        ''
+      );
+
+    if(
+      !targetFriendship &&
+      !targetPlayerObjectId
+    ) {
+      return false;
+    }
+
+    const findEntry =
+      (
+        entries: any[]
+      ) =>
+        entries.find(
+          entry => {
+            const peer =
+              entry?.[
+                PacketDataKeys.FRIEND
+              ] ??
+              entry?.[
+                PacketDataKeys.USER
+              ];
+
+            const friendshipObjectId =
+              String(
+                entry?.[
+                  PacketDataKeys.OBJECT_ID
+                ] ??
+                ''
+              );
+
+            const playerObjectId =
+              String(
+                peer?.[
+                  PacketDataKeys.PLAYER_OBJECT_ID
+                ] ??
+                ''
+              );
+
+            return (
+              (
+                targetFriendship &&
+                friendshipObjectId ===
+                  targetFriendship
+              ) ||
+              (
+                targetPlayerObjectId &&
+                playerObjectId ===
+                  targetPlayerObjectId
+              )
+            );
+          }
+        );
+
+    let entry =
+      findEntry(
+        this.latestFriendshipEntries
+      );
+
+    if(!entry) {
+      try {
+        /*
+          Resolve a cold-start notification using the same official friendship
+          snapshot endpoint already used by Friends. This only reads the list;
+          it does not mark private messages as read.
+        */
+        const packetPromise =
+          this.awaitPacket(
+            PacketDataKeys.FRIENDSHIP_LIST,
+            3500
+          );
+
+        this.send(
+          PacketDataKeys.ADD_CLIENT_TO_FRIENDSHIP_LIST,
+          {
+            [PacketDataKeys.USER_OBJECT_ID]:
+              App.user.objectId,
+
+            [PacketDataKeys.TOKEN]:
+              App.user.token
+          }
+        );
+
+        const packet =
+          await packetPromise;
+
+        const entries =
+          this.friendshipListEntries(
+            packet
+          ) ??
+          [];
+
+        const acceptedEntries =
+          entries.filter(
+            item =>
+              !this.isPendingFriendship(
+                item
+              )
+          );
+
+        this.latestFriendshipEntries =
+          acceptedEntries;
+
+        entry =
+          findEntry(
+            acceptedEntries
+          );
+      } catch(error) {
+        console.warn(
+          'Could not refresh friendship list for notification click',
+          error
+        );
+      }
+    }
+
+    if(!entry)
+      return false;
+
+    const peer =
+      entry?.[
+        PacketDataKeys.FRIEND
+      ] ??
+      entry?.[
+        PacketDataKeys.USER
+      ];
+
+    if(
+      !peer ||
+      typeof peer !== 'object'
+    ) {
+      return false;
+    }
+
+    const friendshipObjectId =
+      String(
+        entry?.[
+          PacketDataKeys.OBJECT_ID
+        ] ??
+        targetFriendship
+      );
+
+    const playerObjectId =
+      String(
+        peer?.[
+          PacketDataKeys.PLAYER_OBJECT_ID
+        ] ??
+        targetPlayerObjectId
+      );
+
+    if(
+      !friendshipObjectId ||
+      !playerObjectId
+    ) {
+      return false;
+    }
+
+    const activeScreen =
+      App.screen as any;
+
+    if(
+      activeScreen?.name ===
+        'PrivateChat' &&
+      String(
+        activeScreen?.friendObjectId ??
+        ''
+      ) ===
+        friendshipObjectId
+    ) {
+      return true;
+    }
+
+    /*
+      Dynamic import avoids adding a hard App <-> PrivateChat module cycle.
+    */
+    const PrivateChat =
+      (
+        await import(
+          '../screen/PrivateChat'
+        )
+      ).default;
+
+    App.screen =
+      new PrivateChat(
+        friendshipObjectId,
+        playerObjectId,
+        peer
+      );
+
+    return true;
   }
 
   private reportOfficialCloudMessagingProbe(
