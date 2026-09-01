@@ -334,6 +334,7 @@ async function loadConversationState(
       return {
         seen: [],
         lines: [],
+        pending: [],
         lastCreated: 0,
         updatedAt: 0
       };
@@ -358,6 +359,38 @@ async function loadConversationState(
               .slice(-4)
           : [],
 
+      pending:
+        Array.isArray(value?.pending)
+          ? value.pending
+              .filter(
+                item =>
+                  item &&
+                  typeof item === 'object'
+              )
+              .map(
+                item => ({
+                  key:
+                    cleanText(
+                      item.key
+                    ),
+                  text:
+                    cleanText(
+                      item.text
+                    ),
+                  created:
+                    Number(
+                      item.created
+                    ) || 0
+                })
+              )
+              .filter(
+                item =>
+                  item.key &&
+                  item.text
+              )
+              .slice(-20)
+          : [],
+
       lastCreated:
         Number(
           value?.lastCreated
@@ -372,6 +405,7 @@ async function loadConversationState(
     return {
       seen: [],
       lines: [],
+      pending: [],
       lastCreated: 0,
       updatedAt: 0
     };
@@ -401,6 +435,10 @@ async function saveConversationState(
           lines:
             Array.isArray(state?.lines)
               ? state.lines.slice(-4)
+              : [],
+          pending:
+            Array.isArray(state?.pending)
+              ? state.pending.slice(-20)
               : [],
           lastCreated:
             Number(
@@ -772,26 +810,179 @@ async function handlePrivatePush(
     friendship
   }
 ) {
-  const tag =
-    `bafia-private-${friendship}`;
+  /*
+    IMPORTANT FOR iOS:
+    WebKit currently does not coalesce notifications by Notification.tag.
+    Calling showNotification() twice for one push therefore creates TWO cards
+    on the lock screen.
+
+    So this handler now calls showNotification EXACTLY ONCE per push.
+    We spend a short, bounded amount of time trying to resolve the real text;
+    if that fails, the same push still produces the generic official body.
+  */
 
   let state =
     await loadConversationState(
       friendship
     );
 
-  const active =
-    await notificationIsActive(
-      tag
+  if(
+    !Array.isArray(
+      state.pending
+    )
+  ) {
+    state.pending = [];
+  }
+
+  const snapshotResult =
+    await fetchPrivateMessageSnapshotOnce(
+      friendship,
+      1800
     );
 
-  /*
-    Dismissed/opened notification = start a fresh visual conversation group,
-    but keep seen message ids so old chat history is not re-added.
-  */
-  if(!active) {
-    state.lines = [];
+  if(snapshotResult.ok) {
+    const snapshot =
+      snapshotResult.messages;
+
+    const seen =
+      new Set(
+        state.seen
+      );
+
+    let unseen = [];
+
+    if(seen.size > 0) {
+      unseen =
+        snapshot.filter(
+          message =>
+            !seen.has(
+              message.key
+            )
+        );
+    } else {
+      /*
+        First successful fetch after installing/updating the worker:
+        do not dump old chat history into notifications.
+      */
+      const recentThreshold =
+        Date.now() -
+        30_000;
+
+      const recent =
+        snapshot.filter(
+          message =>
+            message.created &&
+            message.created >=
+              recentThreshold
+        );
+
+      unseen =
+        recent.length
+          ? recent
+          : snapshot.slice(-1);
+    }
+
+    /*
+      Add all newly discovered messages to a persistent FIFO queue.
+
+      Example:
+        three FCM pushes arrive very fast;
+        the first pcmsr already contains messages A/B/C;
+        first push consumes A,
+        second push consumes B,
+        third push consumes C.
+
+      This is much more deterministic than showing the whole history on every
+      notification.
+    */
+    const pendingKeys =
+      new Set(
+        state.pending.map(
+          item =>
+            cleanText(
+              item?.key
+            )
+        )
+      );
+
+    for(const message of unseen) {
+      if(
+        !message?.key ||
+        pendingKeys.has(
+          message.key
+        )
+      ) {
+        continue;
+      }
+
+      state.pending.push({
+        key:
+          message.key,
+        text:
+          message.text,
+        created:
+          message.created || 0
+      });
+
+      pendingKeys.add(
+        message.key
+      );
+    }
+
+    state.pending =
+      state.pending
+        .filter(
+          item =>
+            cleanText(
+              item?.text
+            )
+        )
+        .slice(-20);
+
+    state.seen =
+      snapshot
+        .map(
+          message =>
+            message.key
+        )
+        .filter(Boolean)
+        .slice(-120);
+
+    state.lastCreated =
+      snapshot.reduce(
+        (
+          max,
+          message
+        ) =>
+          Math.max(
+            max,
+            message.created || 0
+          ),
+        state.lastCreated || 0
+      );
   }
+
+  /*
+    Consume one real message for THIS push.
+    If the short background WebSocket did not resolve in time, keep the
+    official generic body instead of risking a missing notification.
+  */
+  const queuedMessage =
+    state.pending.length
+      ? state.pending.shift()
+      : null;
+
+  await saveConversationState(
+    friendship,
+    state
+  );
+
+  const body =
+    cleanText(
+      queuedMessage?.text
+    ) ||
+    genericBody ||
+    'Новое личное сообщение';
 
   const notificationData = {
     kind:
@@ -805,187 +996,20 @@ async function handlePrivatePush(
       data
   };
 
-  /*
-    FIRST: preserve the exact lock-screen delivery path that is already proven.
-    Same tag means another push from this person updates ONE notification.
-  */
-  const immediateLines =
-    state.lines.slice();
-
-  if(
-    genericBody &&
-    !immediateLines.includes(
-      genericBody
-    )
-  ) {
-    immediateLines.push(
-      genericBody
-    );
-  }
-
   await self.registration.showNotification(
     title,
     {
-      body:
-        groupedBody(
-          immediateLines,
-          genericBody
-        ),
+      body,
       icon:
         './splash_screens/icon.png',
-      tag,
-      data:
-        notificationData
-    }
-  );
 
-  const snapshotResult =
-    await fetchPrivateMessageSnapshot(
-      friendship
-    );
+      /*
+        Keep a stable tag for browsers that DO implement replacement.
+        iOS currently keeps separate cards despite the same tag.
+      */
+      tag:
+        `bafia-private-${friendship}`,
 
-  if(!snapshotResult.ok)
-    return;
-
-  const snapshot =
-    snapshotResult.messages;
-
-  const seen =
-    new Set(
-      state.seen
-    );
-
-  let newMessages = [];
-
-  if(seen.size > 0) {
-    newMessages =
-      snapshot.filter(
-        message => {
-          if(
-            seen.has(
-              message.key
-            )
-          ) {
-            return false;
-          }
-
-          if(
-            state.lastCreated &&
-            message.created
-          ) {
-            return (
-              message.created >=
-              state.lastCreated
-            );
-          }
-
-          return true;
-        }
-      );
-  } else {
-    /*
-      First successful history fetch: don't dump the whole old conversation.
-      Take messages from the current short burst. If timestamps are unavailable,
-      take only the latest message.
-    */
-    const recentThreshold =
-      Date.now() -
-      30_000;
-
-    const recent =
-      snapshot.filter(
-        message =>
-          message.created &&
-          message.created >=
-            recentThreshold
-      );
-
-    newMessages =
-      recent.length
-        ? recent
-        : snapshot.slice(-1);
-  }
-
-  /*
-    Store the current history baseline even if this particular FCM push was a
-    duplicate. This is what makes the next quick push deterministic.
-  */
-  state.seen =
-    snapshot
-      .map(
-        message =>
-          message.key
-      )
-      .filter(Boolean)
-      .slice(-120);
-
-  state.lastCreated =
-    snapshot.reduce(
-      (
-        max,
-        message
-      ) =>
-        Math.max(
-          max,
-          message.created || 0
-        ),
-      state.lastCreated || 0
-    );
-
-  const groupedLines =
-    state.lines.slice();
-
-  for(
-    const message of
-    newMessages
-  ) {
-    const text =
-      cleanText(
-        message.text
-      );
-
-    if(!text)
-      continue;
-
-    /*
-      Same text can legitimately be sent twice, so de-duplicate by key above,
-      not by body text. We still keep the final display compact to four lines.
-    */
-    groupedLines.push(
-      text
-    );
-  }
-
-  state.lines =
-    groupedLines
-      .slice(-4);
-
-  await saveConversationState(
-    friendship,
-    state
-  );
-
-  if(
-    state.lines.length === 0
-  ) {
-    return;
-  }
-
-  /*
-    SECOND: replace the SAME notification with the collected real texts.
-    Three rapid messages become one notification with three body lines.
-  */
-  await self.registration.showNotification(
-    title,
-    {
-      body:
-        groupedBody(
-          state.lines,
-          genericBody
-        ),
-      icon:
-        './splash_screens/icon.png',
-      tag,
       data:
         notificationData
     }
