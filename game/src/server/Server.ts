@@ -74,6 +74,14 @@ export default class Server extends Events<ServerEvents> {
   private recentDirectPrivateNotificationAt =
     new Map<string, number>();
 
+  /*
+    If iOS fully suspends the PWA, timers stop. When the app wakes again we
+    must not turn all messages accumulated during that sleep into a burst of
+    old notifications. A long gap makes the next snapshot a new baseline.
+  */
+  private lastPrivateMessageUnreadSnapshotAt =
+    0;
+
   constructor(){
     super();
 
@@ -172,6 +180,151 @@ export default class Server extends Events<ServerEvents> {
     );
   }
 
+  private privateMessagePreviewFromFriendshipEntry(
+    entry: any,
+    playerObjectId: string
+  ) {
+    /*
+      Newer server payloads can include a last private-chat message (pclm)
+      or a small private-chat message list (pclms) in the friendship row.
+      Use it when present so the notification body contains the real text.
+
+      This is read-only: no acpc subscription and no ACCEPT_MESSAGES packet,
+      so it cannot mark the conversation as read or interfere with PrivateChat.
+    */
+    const rawCandidates: any[] = [];
+
+    const addCandidate = (
+      value: any
+    ) => {
+      if(value === undefined || value === null)
+        return;
+
+      if(Array.isArray(value)) {
+        for(
+          let index = value.length - 1;
+          index >= 0;
+          index--
+        ) {
+          rawCandidates.push(
+            value[index]
+          );
+        }
+
+        return;
+      }
+
+      rawCandidates.push(
+        value
+      );
+    };
+
+    addCandidate(
+      entry?.[
+        PacketDataKeys.PRIVATE_CHAT_LAST_MESSAGE
+      ]
+    );
+
+    addCandidate(
+      entry?.[
+        PacketDataKeys.PRIVATE_CHAT_LIST_MESSAGES
+      ]
+    );
+
+    /*
+      Some packet shapes wrap the latest message under ordinary MESSAGE.
+    */
+    addCandidate(
+      entry?.[
+        PacketDataKeys.MESSAGE
+      ]
+    );
+
+    const peer =
+      entry?.[
+        PacketDataKeys.FRIEND
+      ] ??
+      entry?.[
+        PacketDataKeys.USER
+      ];
+
+    addCandidate(
+      peer?.[
+        PacketDataKeys.PRIVATE_CHAT_LAST_MESSAGE
+      ]
+    );
+
+    addCandidate(
+      peer?.[
+        PacketDataKeys.PRIVATE_CHAT_LIST_MESSAGES
+      ]
+    );
+
+    for(const raw of rawCandidates) {
+      const message =
+        raw?.[
+          PacketDataKeys.MESSAGE
+        ] ??
+        raw;
+
+      if(
+        !message ||
+        typeof message !== 'object'
+      ) {
+        continue;
+      }
+
+      const senderPlayerObjectId =
+        String(
+          message?.[
+            PacketDataKeys.PLAYER_OBJECT_ID
+          ] ??
+          ''
+        );
+
+      /*
+        If the payload identifies the sender, only use a message from the
+        friend whose unread counter increased.
+      */
+      if(
+        senderPlayerObjectId &&
+        senderPlayerObjectId !==
+          playerObjectId
+      ) {
+        continue;
+      }
+
+      const isSticker =
+        Boolean(
+          message?.[
+            PacketDataKeys.MESSAGE_STICKER
+          ]
+        );
+
+      if(isSticker)
+        return 'Стикер';
+
+      const body =
+        String(
+          message?.[
+            PacketDataKeys.TEXT
+          ] ??
+          ''
+        )
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      if(!body)
+        continue;
+
+      return body.length > 180
+        ? `${body.slice(0, 177)}…`
+        : body;
+    }
+
+    return '';
+  }
+
   private async handleFriendshipUnreadNotification(
     data: any
   ) {
@@ -205,6 +358,16 @@ export default class Server extends Events<ServerEvents> {
 
     const nextCounts =
       new Map<string, number>();
+
+    const rows =
+      new Map<
+        string,
+        {
+          entry: any;
+          peer: any;
+          unread: number;
+        }
+      >();
 
     for(const entry of acceptedEntries) {
       const peer =
@@ -247,14 +410,69 @@ export default class Server extends Events<ServerEvents> {
         unread
       );
 
-      if(
-        !this.privateMessageUnreadBaselineReady
-      ) {
-        continue;
-      }
+      rows.set(
+        playerObjectId,
+        {
+          entry,
+          peer,
+          unread
+        }
+      );
+    }
 
+    const now =
+      Date.now();
+
+    const previousCounts =
+      this.privateMessageUnreadCounts;
+
+    const hadBaseline =
+      this.privateMessageUnreadBaselineReady;
+
+    const snapshotGap =
+      this.lastPrivateMessageUnreadSnapshotAt > 0
+        ? (
+            now -
+            this.lastPrivateMessageUnreadSnapshotAt
+          )
+        : 0;
+
+    /*
+      IMPORTANT:
+      Commit the new counts BEFORE awaiting any notification work. Multiple
+      FRIENDSHIP_LIST packets can arrive close together (our poll + Friends).
+      Updating state first prevents the same unread increase from being
+      processed by two concurrent async handlers.
+    */
+    this.privateMessageUnreadCounts =
+      nextCounts;
+
+    this.privateMessageUnreadBaselineReady =
+      true;
+
+    this.lastPrivateMessageUnreadSnapshotAt =
+      now;
+
+    if(!hadBaseline)
+      return;
+
+    /*
+      iOS stops JS timers while the Home Screen app is fully suspended/locked.
+      After a long gap, old unread counters can jump all at once. Treat that
+      first post-suspension snapshot as a baseline instead of spamming every
+      message that accumulated while JavaScript was asleep.
+    */
+    if(snapshotGap > 25_000)
+      return;
+
+    for(
+      const [
+        playerObjectId,
+        row
+      ] of rows
+    ) {
       const previousUnread =
-        this.privateMessageUnreadCounts.get(
+        previousCounts.get(
           playerObjectId
         );
 
@@ -265,7 +483,7 @@ export default class Server extends Events<ServerEvents> {
       if(previousUnread === undefined)
         continue;
 
-      if(unread <= previousUnread)
+      if(row.unread <= previousUnread)
         continue;
 
       const activeScreen =
@@ -286,8 +504,7 @@ export default class Server extends Events<ServerEvents> {
 
       /*
         If pcmr was delivered for this same sender, that path already showed
-        the richer notification with the actual message text. Suppress only
-        the immediate unread-counter echo from the friendship snapshot.
+        the richer notification with the actual message text.
       */
       const directNotificationAt =
         this.recentDirectPrivateNotificationAt.get(
@@ -305,24 +522,44 @@ export default class Server extends Events<ServerEvents> {
 
       const username =
         String(
-          peer?.[
+          row.peer?.[
             PacketDataKeys.USERNAME
           ] ??
           'Новое личное сообщение'
         ).trim() ||
         'Новое личное сообщение';
 
-      const delta =
-        unread - previousUnread;
+      const preview =
+        this.privateMessagePreviewFromFriendshipEntry(
+          row.entry,
+          playerObjectId
+        );
+
+      /*
+        Re-check after preview extraction in case a real pcmr arrived in the
+        meantime and already produced the text-rich notification.
+      */
+      const directNotificationAtNow =
+        this.recentDirectPrivateNotificationAt.get(
+          playerObjectId
+        ) ??
+        0;
+
+      if(
+        Date.now() -
+          directNotificationAtNow <
+        12_000
+      ) {
+        continue;
+      }
 
       await App.showPrivateMessageNotification({
         title:
           username,
 
         body:
-          delta > 1
-            ? `Новых сообщений: ${delta}`
-            : 'Новое личное сообщение',
+          preview ||
+          'Новое личное сообщение',
 
         tag:
           `bafia-private-${playerObjectId}`,
@@ -331,14 +568,14 @@ export default class Server extends Events<ServerEvents> {
           playerObjectId,
 
           friendship:
-            entry?.[
+            row.entry?.[
               PacketDataKeys.OBJECT_ID
             ] !== undefined &&
-            entry?.[
+            row.entry?.[
               PacketDataKeys.OBJECT_ID
             ] !== null
               ? String(
-                  entry[
+                  row.entry[
                     PacketDataKeys.OBJECT_ID
                   ]
                 )
@@ -346,12 +583,6 @@ export default class Server extends Events<ServerEvents> {
         }
       });
     }
-
-    this.privateMessageUnreadCounts =
-      nextCounts;
-
-    this.privateMessageUnreadBaselineReady =
-      true;
   }
 
   private stopPrivateMessageUnreadPolling() {

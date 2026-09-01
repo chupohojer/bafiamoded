@@ -35825,6 +35825,12 @@ ${e2}`
     privateMessageUnreadBaselineReady = false;
     privateMessageUnreadPollTimer;
     recentDirectPrivateNotificationAt = /* @__PURE__ */ new Map();
+    /*
+      If iOS fully suspends the PWA, timers stop. When the app wakes again we
+      must not turn all messages accumulated during that sleep into a burst of
+      old notifications. A long gap makes the next snapshot a new baseline.
+    */
+    lastPrivateMessageUnreadSnapshotAt = 0;
     constructor() {
       super();
       this.on("close", async (ip) => {
@@ -35879,6 +35885,64 @@ ${e2}`
       const accepted = entry?.[PacketDataKeys_default.ACCEPTED];
       return accepted === 0 || accepted === false || accepted === "0";
     }
+    privateMessagePreviewFromFriendshipEntry(entry, playerObjectId) {
+      const rawCandidates = [];
+      const addCandidate2 = (value2) => {
+        if (value2 === void 0 || value2 === null)
+          return;
+        if (Array.isArray(value2)) {
+          for (let index2 = value2.length - 1; index2 >= 0; index2--) {
+            rawCandidates.push(
+              value2[index2]
+            );
+          }
+          return;
+        }
+        rawCandidates.push(
+          value2
+        );
+      };
+      addCandidate2(
+        entry?.[PacketDataKeys_default.PRIVATE_CHAT_LAST_MESSAGE]
+      );
+      addCandidate2(
+        entry?.[PacketDataKeys_default.PRIVATE_CHAT_LIST_MESSAGES]
+      );
+      addCandidate2(
+        entry?.[PacketDataKeys_default.MESSAGE]
+      );
+      const peer = entry?.[PacketDataKeys_default.FRIEND] ?? entry?.[PacketDataKeys_default.USER];
+      addCandidate2(
+        peer?.[PacketDataKeys_default.PRIVATE_CHAT_LAST_MESSAGE]
+      );
+      addCandidate2(
+        peer?.[PacketDataKeys_default.PRIVATE_CHAT_LIST_MESSAGES]
+      );
+      for (const raw of rawCandidates) {
+        const message = raw?.[PacketDataKeys_default.MESSAGE] ?? raw;
+        if (!message || typeof message !== "object") {
+          continue;
+        }
+        const senderPlayerObjectId = String(
+          message?.[PacketDataKeys_default.PLAYER_OBJECT_ID] ?? ""
+        );
+        if (senderPlayerObjectId && senderPlayerObjectId !== playerObjectId) {
+          continue;
+        }
+        const isSticker = Boolean(
+          message?.[PacketDataKeys_default.MESSAGE_STICKER]
+        );
+        if (isSticker)
+          return "\u0421\u0442\u0438\u043A\u0435\u0440";
+        const body = String(
+          message?.[PacketDataKeys_default.TEXT] ?? ""
+        ).replace(/\s+/g, " ").trim();
+        if (!body)
+          continue;
+        return body.length > 180 ? `${body.slice(0, 177)}\u2026` : body;
+      }
+      return "";
+    }
     async handleFriendshipUnreadNotification(data2) {
       const entries2 = this.friendshipListEntries(
         data2
@@ -35894,6 +35958,7 @@ ${e2}`
         return;
       }
       const nextCounts = /* @__PURE__ */ new Map();
+      const rows = /* @__PURE__ */ new Map();
       for (const entry of acceptedEntries) {
         const peer = entry?.[PacketDataKeys_default.FRIEND] ?? entry?.[PacketDataKeys_default.USER];
         const playerObjectId = String(
@@ -35912,15 +35977,36 @@ ${e2}`
           playerObjectId,
           unread
         );
-        if (!this.privateMessageUnreadBaselineReady) {
-          continue;
-        }
-        const previousUnread = this.privateMessageUnreadCounts.get(
+        rows.set(
+          playerObjectId,
+          {
+            entry,
+            peer,
+            unread
+          }
+        );
+      }
+      const now = Date.now();
+      const previousCounts = this.privateMessageUnreadCounts;
+      const hadBaseline = this.privateMessageUnreadBaselineReady;
+      const snapshotGap = this.lastPrivateMessageUnreadSnapshotAt > 0 ? now - this.lastPrivateMessageUnreadSnapshotAt : 0;
+      this.privateMessageUnreadCounts = nextCounts;
+      this.privateMessageUnreadBaselineReady = true;
+      this.lastPrivateMessageUnreadSnapshotAt = now;
+      if (!hadBaseline)
+        return;
+      if (snapshotGap > 25e3)
+        return;
+      for (const [
+        playerObjectId,
+        row
+      ] of rows) {
+        const previousUnread = previousCounts.get(
           playerObjectId
         );
         if (previousUnread === void 0)
           continue;
-        if (unread <= previousUnread)
+        if (row.unread <= previousUnread)
           continue;
         const activeScreen = App_default2.screen;
         const sameVisibleChat = document.visibilityState === "visible" && activeScreen?.name === "PrivateChat" && String(
@@ -35935,23 +36021,30 @@ ${e2}`
           continue;
         }
         const username = String(
-          peer?.[PacketDataKeys_default.USERNAME] ?? "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435"
+          row.peer?.[PacketDataKeys_default.USERNAME] ?? "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435"
         ).trim() || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435";
-        const delta = unread - previousUnread;
+        const preview = this.privateMessagePreviewFromFriendshipEntry(
+          row.entry,
+          playerObjectId
+        );
+        const directNotificationAtNow = this.recentDirectPrivateNotificationAt.get(
+          playerObjectId
+        ) ?? 0;
+        if (Date.now() - directNotificationAtNow < 12e3) {
+          continue;
+        }
         await App_default2.showPrivateMessageNotification({
           title: username,
-          body: delta > 1 ? `\u041D\u043E\u0432\u044B\u0445 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439: ${delta}` : "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
+          body: preview || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
           tag: `bafia-private-${playerObjectId}`,
           data: {
             playerObjectId,
-            friendship: entry?.[PacketDataKeys_default.OBJECT_ID] !== void 0 && entry?.[PacketDataKeys_default.OBJECT_ID] !== null ? String(
-              entry[PacketDataKeys_default.OBJECT_ID]
+            friendship: row.entry?.[PacketDataKeys_default.OBJECT_ID] !== void 0 && row.entry?.[PacketDataKeys_default.OBJECT_ID] !== null ? String(
+              row.entry[PacketDataKeys_default.OBJECT_ID]
             ) : void 0
           }
         });
       }
-      this.privateMessageUnreadCounts = nextCounts;
-      this.privateMessageUnreadBaselineReady = true;
     }
     stopPrivateMessageUnreadPolling() {
       if (this.privateMessageUnreadPollTimer !== void 0) {
