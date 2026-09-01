@@ -84,6 +84,20 @@ class App extends Events<AppEvents> {
   #notificationServiceWorkerRegistration?:
     ServiceWorkerRegistration;
 
+  #notificationServiceWorkerMessage =
+    (event: MessageEvent) => {
+      if(
+        event.data?.type !==
+          'bafia-notification-click'
+      ) {
+        return;
+      }
+
+      void this.#openPrivateMessageNotification(
+        event.data?.data ?? {}
+      );
+    };
+
   #windowEvents = {
     popState: (e: PopStateEvent) => this.emit("popstate", e),
     focusOut: (e: FocusEvent) => {
@@ -162,6 +176,7 @@ class App extends Events<AppEvents> {
     this.#loadImgs();
     this.#initCommands();
     this.#initEvents();
+    this.#initNotificationClickHandling();
 
     /*
       Registration itself does NOT ask for notification permission.
@@ -294,17 +309,80 @@ class App extends Events<AppEvents> {
       ).toString();
 
     try {
+      const tag =
+        options.tag ??
+        'bafia-private-message';
+
+      const incomingBody =
+        String(
+          options.body ||
+          'Вам написали в Бафии'
+        )
+          .replace(/\s+/g, ' ')
+          .trim();
+
+      /*
+        Keep repeated messages from the same person inside ONE notification.
+        This also lets the live websocket path and the lock-screen FCM path
+        share the same tag without creating two separate stacks.
+      */
+      let body =
+        incomingBody;
+
+      try {
+        const existing =
+          await registration.getNotifications({
+            tag
+          });
+
+        const previousBody =
+          String(
+            existing[0]?.body ??
+            ''
+          ).trim();
+
+        if(previousBody) {
+          const lines =
+            previousBody
+              .split('\n')
+              .map(line =>
+                line
+                  .replace(/\s+/g, ' ')
+                  .trim()
+              )
+              .filter(Boolean);
+
+          if(
+            incomingBody &&
+            !lines.includes(
+              incomingBody
+            )
+          ) {
+            lines.push(
+              incomingBody
+            );
+          }
+
+          body =
+            lines
+              .slice(-4)
+              .join('\n') ||
+            incomingBody;
+        }
+      } catch {
+        /*
+          getNotifications() grouping is an enhancement only.
+          Never let it block an otherwise valid notification.
+        */
+      }
+
       await registration.showNotification(
         options.title ||
           'Новое личное сообщение',
         {
-          body:
-            options.body ||
-            'Вам написали в Бафии',
+          body,
           icon,
-          tag:
-            options.tag ??
-            'bafia-private-message',
+          tag,
           data: {
             kind:
               'bafia-private-message',
@@ -323,6 +401,142 @@ class App extends Events<AppEvents> {
       );
 
       return false;
+    }
+  }
+
+  #initNotificationClickHandling() {
+    if(
+      'serviceWorker' in navigator
+    ) {
+      navigator.serviceWorker.addEventListener(
+        'message',
+        this.#notificationServiceWorkerMessage
+      );
+    }
+
+    /*
+      Cold-start path:
+      when iOS wakes the PWA from a notification and there is no existing
+      client window, sw.js opens the app with these tiny query parameters.
+      Read them once, remove them from the address bar, then let Server resolve
+      the friendship and open the correct PrivateChat after authentication.
+    */
+    const url =
+      new URL(
+        window.location.href
+      );
+
+    const friendship =
+      url.searchParams.get(
+        'bafiaPushFriendship'
+      );
+
+    const playerObjectId =
+      url.searchParams.get(
+        'bafiaPushPlayer'
+      );
+
+    const deeplinkUri =
+      url.searchParams.get(
+        'bafiaPushDeeplink'
+      );
+
+    if(
+      !friendship &&
+      !playerObjectId &&
+      !deeplinkUri
+    ) {
+      return;
+    }
+
+    url.searchParams.delete(
+      'bafiaPushFriendship'
+    );
+
+    url.searchParams.delete(
+      'bafiaPushPlayer'
+    );
+
+    url.searchParams.delete(
+      'bafiaPushDeeplink'
+    );
+
+    window.history.replaceState(
+      window.history.state,
+      document.title,
+      `${url.pathname}${
+        url.search
+      }${url.hash}`
+    );
+
+    void this.#openPrivateMessageNotification({
+      friendship:
+        friendship ?? undefined,
+      playerObjectId:
+        playerObjectId ?? undefined,
+      deeplinkUri:
+        deeplinkUri ?? undefined
+    });
+  }
+
+  async #openPrivateMessageNotification(
+    data: Record<string, any>
+  ) {
+    /*
+      A foreground/background notification click can arrive immediately.
+      A lock-screen cold start has to wait until Auth has restored App.user
+      and the websocket is actually open.
+    */
+    for(
+      let attempt = 0;
+      attempt < 48;
+      attempt++
+    ) {
+      if(
+        this.server &&
+        this.user?.objectId &&
+        this.user?.token &&
+        this.server.webSocket?.readyState ===
+          WebSocket.OPEN
+      ) {
+        break;
+      }
+
+      await new Promise<void>(
+        resolve =>
+          window.setTimeout(
+            resolve,
+            250
+          )
+      );
+    }
+
+    if(
+      !this.server ||
+      !this.user?.objectId ||
+      !this.user?.token ||
+      this.server.webSocket?.readyState !==
+        WebSocket.OPEN
+    ) {
+      console.warn(
+        'Could not open private chat from notification: app is not authenticated yet',
+        data
+      );
+
+      return;
+    }
+
+    const opened =
+      await this.server
+        .openPrivateChatFromNotification(
+          data
+        );
+
+    if(!opened) {
+      console.warn(
+        'Could not resolve private chat from notification',
+        data
+      );
     }
   }
 
@@ -622,6 +836,16 @@ class App extends Events<AppEvents> {
 
   #destroyEvents() {
     this.removeAllEvents();
+
+    if(
+      'serviceWorker' in navigator
+    ) {
+      navigator.serviceWorker.removeEventListener(
+        'message',
+        this.#notificationServiceWorkerMessage
+      );
+    }
+
     window.removeEventListener("popstate", this.#windowEvents.popState);
     window.removeEventListener("focusout", this.#windowEvents.focusOut);
     window.removeEventListener(

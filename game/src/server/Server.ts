@@ -577,6 +577,20 @@ export default class Server extends Events<ServerEvents> {
         continue;
       }
 
+      const friendshipObjectId =
+        row.entry?.[
+          PacketDataKeys.OBJECT_ID
+        ] !== undefined &&
+        row.entry?.[
+          PacketDataKeys.OBJECT_ID
+        ] !== null
+          ? String(
+              row.entry[
+                PacketDataKeys.OBJECT_ID
+              ]
+            )
+          : '';
+
       await App.showPrivateMessageNotification({
         title:
           username,
@@ -585,25 +599,21 @@ export default class Server extends Events<ServerEvents> {
           preview ||
           'Новое личное сообщение',
 
+        /*
+          Official FCM push also uses friendship id.
+          One conversation => one OS notification.
+        */
         tag:
-          `bafia-private-${playerObjectId}`,
+          friendshipObjectId
+            ? `bafia-private-${friendshipObjectId}`
+            : `bafia-private-player-${playerObjectId}`,
 
         data: {
           playerObjectId,
 
           friendship:
-            row.entry?.[
-              PacketDataKeys.OBJECT_ID
-            ] !== undefined &&
-            row.entry?.[
-              PacketDataKeys.OBJECT_ID
-            ] !== null
-              ? String(
-                  row.entry[
-                    PacketDataKeys.OBJECT_ID
-                  ]
-                )
-              : undefined
+            friendshipObjectId ||
+            undefined
         }
       });
     }
@@ -860,7 +870,7 @@ export default class Server extends Events<ServerEvents> {
         ]
       );
 
-    const friendship =
+    let friendship =
       data?.[
         PacketDataKeys.FRIENDSHIP
       ] ??
@@ -869,6 +879,49 @@ export default class Server extends Events<ServerEvents> {
           ? activeScreen?.friendObjectId
           : undefined
       );
+
+    /*
+      pcmr does not always carry `fp`. Resolve it from our latest ordinary
+      FRIENDSHIP_LIST snapshot so the live websocket notification uses the
+      SAME tag as the official FCM lock-screen notification.
+    */
+    if(
+      friendship === undefined ||
+      friendship === null ||
+      String(friendship) === ''
+    ) {
+      const friendshipEntry =
+        this.latestFriendshipEntries.find(
+          entry => {
+            const peer =
+              entry?.[
+                PacketDataKeys.FRIEND
+              ] ??
+              entry?.[
+                PacketDataKeys.USER
+              ];
+
+            return String(
+              peer?.[
+                PacketDataKeys.PLAYER_OBJECT_ID
+              ] ??
+              ''
+            ) ===
+              senderPlayerObjectId;
+          }
+        );
+
+      friendship =
+        friendshipEntry?.[
+          PacketDataKeys.OBJECT_ID
+        ];
+    }
+
+    const friendshipObjectId =
+      friendship !== undefined &&
+      friendship !== null
+        ? String(friendship)
+        : '';
 
     const shown =
       await App.showPrivateMessageNotification({
@@ -885,19 +938,17 @@ export default class Server extends Events<ServerEvents> {
               ),
 
         tag:
-          `bafia-private-${
-            senderPlayerObjectId
-          }`,
+          friendshipObjectId
+            ? `bafia-private-${friendshipObjectId}`
+            : `bafia-private-player-${senderPlayerObjectId}`,
 
         data: {
           playerObjectId:
             senderPlayerObjectId,
 
           friendship:
-            friendship !== undefined &&
-            friendship !== null
-              ? String(friendship)
-              : undefined
+            friendshipObjectId ||
+            undefined
         }
       });
 

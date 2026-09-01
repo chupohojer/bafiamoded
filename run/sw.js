@@ -7,6 +7,17 @@ const PUSH_STATE_URL =
     self.registration.scope
   ).toString();
 
+const PUSH_CONVERSATION_CACHE =
+  'bafia-push-conversations-v1';
+
+/*
+  Burst pushes from the same person are serialized inside one SW lifetime.
+  This is important when 2-3 FCM pushes arrive almost simultaneously: without
+  it they open several Mafia WebSockets at once and race for the same pcmsr.
+*/
+const conversationJobs =
+  new Map();
+
 self.addEventListener('install', () => {
   self.skipWaiting();
 });
@@ -20,15 +31,17 @@ self.addEventListener('activate', (event) => {
       await Promise.all(
         keys
           .filter(
-            (key) =>
+            key =>
               key.startsWith(
                 'bafia-'
               ) &&
               key !==
-                PUSH_STATE_CACHE
+                PUSH_STATE_CACHE &&
+              key !==
+                PUSH_CONVERSATION_CACHE
           )
           .map(
-            (key) =>
+            key =>
               caches.delete(key)
           )
       );
@@ -39,9 +52,8 @@ self.addEventListener('activate', (event) => {
 });
 
 /*
-  IMPORTANT:
-  There is deliberately NO fetch event handler here.
-  Avatars and normal game networking are never intercepted.
+  Deliberately NO fetch event handler.
+  Avatars and normal game networking stay completely outside the SW.
 */
 
 async function savePushSessionState(
@@ -138,7 +150,7 @@ async function loadPushSessionState() {
 
 self.addEventListener(
   'message',
-  (event) => {
+  event => {
     if(
       event.data?.type !==
         'bafia-push-session-state'
@@ -161,6 +173,25 @@ function cleanText(value) {
   )
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeCreated(value) {
+  const number =
+    Number(value);
+
+  if(
+    !Number.isFinite(number) ||
+    number <= 0
+  ) {
+    return 0;
+  }
+
+  /*
+    Server builds have historically used both seconds and milliseconds.
+  */
+  return number < 100000000000
+    ? number * 1000
+    : number;
 }
 
 function privateChatFriendshipFromDeeplink(
@@ -190,10 +221,6 @@ function privateChatFriendshipFromDeeplink(
           }
         });
 
-    /*
-      Handles e.g. mafia://private_chat/<friendshipId>
-      where `private_chat` becomes the URL host rather than a path segment.
-    */
     if(
       url.hostname ===
         'private_chat' &&
@@ -219,9 +246,7 @@ function privateChatFriendshipFromDeeplink(
         segments[index + 1]
       );
     }
-  } catch {
-    /* custom/odd URI fallback below */
-  }
+  } catch {}
 
   const match =
     raw.match(
@@ -257,10 +282,6 @@ function privateChatFriendshipFromPush(
   if(fromDeeplink)
     return fromDeeplink;
 
-  /*
-    Small fallback for official grouping strings such as
-    private_chat_<friendshipId>, if the server ever omits deeplinkUri.
-  */
   const group =
     cleanText(
       data?.notificationGroup
@@ -276,7 +297,150 @@ function privateChatFriendshipFromPush(
     : '';
 }
 
-function latestIncomingMessageBody(
+function conversationStateUrl(
+  friendship
+) {
+  const url =
+    new URL(
+      './__bafia_push_conversation__',
+      self.registration.scope
+    );
+
+  url.searchParams.set(
+    'friendship',
+    friendship
+  );
+
+  return url.toString();
+}
+
+async function loadConversationState(
+  friendship
+) {
+  try {
+    const cache =
+      await caches.open(
+        PUSH_CONVERSATION_CACHE
+      );
+
+    const response =
+      await cache.match(
+        conversationStateUrl(
+          friendship
+        )
+      );
+
+    if(!response)
+      return {
+        seen: [],
+        lines: [],
+        lastCreated: 0,
+        updatedAt: 0
+      };
+
+    const value =
+      await response.json();
+
+    return {
+      seen:
+        Array.isArray(value?.seen)
+          ? value.seen
+              .map(cleanText)
+              .filter(Boolean)
+              .slice(-120)
+          : [],
+
+      lines:
+        Array.isArray(value?.lines)
+          ? value.lines
+              .map(cleanText)
+              .filter(Boolean)
+              .slice(-4)
+          : [],
+
+      lastCreated:
+        Number(
+          value?.lastCreated
+        ) || 0,
+
+      updatedAt:
+        Number(
+          value?.updatedAt
+        ) || 0
+    };
+  } catch {
+    return {
+      seen: [],
+      lines: [],
+      lastCreated: 0,
+      updatedAt: 0
+    };
+  }
+}
+
+async function saveConversationState(
+  friendship,
+  state
+) {
+  try {
+    const cache =
+      await caches.open(
+        PUSH_CONVERSATION_CACHE
+      );
+
+    await cache.put(
+      conversationStateUrl(
+        friendship
+      ),
+      new Response(
+        JSON.stringify({
+          seen:
+            Array.isArray(state?.seen)
+              ? state.seen.slice(-120)
+              : [],
+          lines:
+            Array.isArray(state?.lines)
+              ? state.lines.slice(-4)
+              : [],
+          lastCreated:
+            Number(
+              state?.lastCreated
+            ) || 0,
+          updatedAt:
+            Date.now()
+        }),
+        {
+          headers: {
+            'content-type':
+              'application/json'
+          }
+        }
+      )
+    );
+  } catch {}
+}
+
+async function clearConversationState(
+  friendship
+) {
+  if(!friendship)
+    return;
+
+  try {
+    const cache =
+      await caches.open(
+        PUSH_CONVERSATION_CACHE
+      );
+
+    await cache.delete(
+      conversationStateUrl(
+        friendship
+      )
+    );
+  } catch {}
+}
+
+function messageSnapshotFromPacket(
   packet,
   ownPlayerObjectId
 ) {
@@ -289,18 +453,17 @@ function latestIncomingMessageBody(
             : []
         );
 
-  if(!messages.length)
-    return '';
-
   const ownId =
     cleanText(
       ownPlayerObjectId
     );
 
+  const result = [];
+
   for(
-    let index = messages.length - 1;
-    index >= 0;
-    index--
+    let index = 0;
+    index < messages.length;
+    index++
   ) {
     const message =
       messages[index];
@@ -325,27 +488,76 @@ function latestIncomingMessageBody(
       continue;
     }
 
-    if(message.mstk)
-      return 'Стикер';
-
     const text =
-      cleanText(
-        message.tx
-      );
+      message.mstk
+        ? 'Стикер'
+        : cleanText(
+            message.tx
+          );
 
     if(!text)
       continue;
 
-    return text.length > 220
-      ? `${text.slice(0, 217)}…`
-      : text;
+    const id =
+      cleanText(
+        message.o
+      );
+
+    const created =
+      normalizeCreated(
+        message.c
+      );
+
+    const key =
+      id ||
+      [
+        senderId,
+        String(created),
+        text
+      ].join('|');
+
+    result.push({
+      key,
+      text:
+        text.length > 220
+          ? `${text.slice(0, 217)}…`
+          : text,
+      created,
+      order:
+        index
+    });
   }
 
-  return '';
+  /*
+    Preserve the server order, but timestamps help if one build happens to
+    return the list in another order.
+  */
+  result.sort(
+    (a, b) => {
+      if(
+        a.created &&
+        b.created &&
+        a.created !== b.created
+      ) {
+        return (
+          a.created -
+          b.created
+        );
+      }
+
+      return (
+        a.order -
+        b.order
+      );
+    }
+  );
+
+  return result;
 }
 
-async function fetchLatestPrivateMessageBody(
-  friendship
+async function fetchPrivateMessageSnapshotOnce(
+  friendship,
+  timeoutMs = 4200
 ) {
   const state =
     await loadPushSessionState();
@@ -356,7 +568,10 @@ async function fetchLatestPrivateMessageBody(
     typeof WebSocket ===
       'undefined'
   ) {
-    return '';
+    return {
+      ok: false,
+      messages: []
+    };
   }
 
   return new Promise(resolve => {
@@ -364,7 +579,10 @@ async function fetchLatestPrivateMessageBody(
     let finished = false;
 
     const finish =
-      (value = '') => {
+      (
+        ok,
+        messages = []
+      ) => {
         if(finished)
           return;
 
@@ -375,20 +593,20 @@ async function fetchLatestPrivateMessageBody(
           socket?.close();
         } catch {}
 
-        resolve(
-          cleanText(value)
-        );
+        resolve({
+          ok,
+          messages
+        });
       };
 
-    /*
-      Keep this short. The generic notification has ALREADY been shown before
-      this helper is called, so a slow/unsupported socket can never suppress
-      lock-screen delivery.
-    */
     const timer =
       setTimeout(
-        () => finish(''),
-        2800
+        () =>
+          finish(
+            false,
+            []
+          ),
+        timeoutMs
       );
 
     try {
@@ -399,7 +617,7 @@ async function fetchLatestPrivateMessageBody(
           )
         );
     } catch {
-      finish('');
+      finish(false, []);
       return;
     }
 
@@ -420,14 +638,14 @@ async function fetchLatestPrivateMessageBody(
             })
           );
         } catch {
-          finish('');
+          finish(false, []);
         }
       }
     );
 
     socket.addEventListener(
       'message',
-      (event) => {
+      event => {
         let packet;
 
         try {
@@ -447,7 +665,8 @@ async function fetchLatestPrivateMessageBody(
         }
 
         finish(
-          latestIncomingMessageBody(
+          true,
+          messageSnapshotFromPacket(
             packet,
             state.playerObjectId
           )
@@ -457,190 +676,531 @@ async function fetchLatestPrivateMessageBody(
 
     socket.addEventListener(
       'error',
-      () => finish('')
+      () =>
+        finish(
+          false,
+          []
+        )
     );
 
     socket.addEventListener(
       'close',
-      () => finish('')
+      () =>
+        finish(
+          false,
+          []
+        )
     );
   });
 }
 
+async function fetchPrivateMessageSnapshot(
+  friendship
+) {
+  const first =
+    await fetchPrivateMessageSnapshotOnce(
+      friendship,
+      4200
+    );
+
+  if(first.ok)
+    return first;
+
+  /*
+    A rapid burst used to fail selectively because several short-lived sockets
+    raced each other. Jobs are serialized now, and one small retry gives a
+    suspended iPhone another chance if the first socket woke too early.
+  */
+  await new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        250
+      )
+  );
+
+  return fetchPrivateMessageSnapshotOnce(
+    friendship,
+    4200
+  );
+}
+
+function groupedBody(
+  lines,
+  fallback
+) {
+  const normalized =
+    Array.isArray(lines)
+      ? lines
+          .map(cleanText)
+          .filter(Boolean)
+          .slice(-4)
+      : [];
+
+  return normalized.length
+    ? normalized.join('\n')
+    : cleanText(
+        fallback
+      );
+}
+
+async function notificationIsActive(
+  tag
+) {
+  try {
+    const notifications =
+      await self.registration.getNotifications({
+        tag
+      });
+
+    return (
+      notifications.length >
+      0
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function handlePrivatePush(
+  {
+    data,
+    notification,
+    title,
+    genericBody,
+    deeplinkUri,
+    friendship
+  }
+) {
+  const tag =
+    `bafia-private-${friendship}`;
+
+  let state =
+    await loadConversationState(
+      friendship
+    );
+
+  const active =
+    await notificationIsActive(
+      tag
+    );
+
+  /*
+    Dismissed/opened notification = start a fresh visual conversation group,
+    but keep seen message ids so old chat history is not re-added.
+  */
+  if(!active) {
+    state.lines = [];
+  }
+
+  const notificationData = {
+    kind:
+      'bafia-official-push',
+    friendship,
+    deeplinkUri:
+      deeplinkUri
+        ? String(deeplinkUri)
+        : undefined,
+    raw:
+      data
+  };
+
+  /*
+    FIRST: preserve the exact lock-screen delivery path that is already proven.
+    Same tag means another push from this person updates ONE notification.
+  */
+  const immediateLines =
+    state.lines.slice();
+
+  if(
+    genericBody &&
+    !immediateLines.includes(
+      genericBody
+    )
+  ) {
+    immediateLines.push(
+      genericBody
+    );
+  }
+
+  await self.registration.showNotification(
+    title,
+    {
+      body:
+        groupedBody(
+          immediateLines,
+          genericBody
+        ),
+      icon:
+        './splash_screens/icon.png',
+      tag,
+      data:
+        notificationData
+    }
+  );
+
+  const snapshotResult =
+    await fetchPrivateMessageSnapshot(
+      friendship
+    );
+
+  if(!snapshotResult.ok)
+    return;
+
+  const snapshot =
+    snapshotResult.messages;
+
+  const seen =
+    new Set(
+      state.seen
+    );
+
+  let newMessages = [];
+
+  if(seen.size > 0) {
+    newMessages =
+      snapshot.filter(
+        message => {
+          if(
+            seen.has(
+              message.key
+            )
+          ) {
+            return false;
+          }
+
+          if(
+            state.lastCreated &&
+            message.created
+          ) {
+            return (
+              message.created >=
+              state.lastCreated
+            );
+          }
+
+          return true;
+        }
+      );
+  } else {
+    /*
+      First successful history fetch: don't dump the whole old conversation.
+      Take messages from the current short burst. If timestamps are unavailable,
+      take only the latest message.
+    */
+    const recentThreshold =
+      Date.now() -
+      30_000;
+
+    const recent =
+      snapshot.filter(
+        message =>
+          message.created &&
+          message.created >=
+            recentThreshold
+      );
+
+    newMessages =
+      recent.length
+        ? recent
+        : snapshot.slice(-1);
+  }
+
+  /*
+    Store the current history baseline even if this particular FCM push was a
+    duplicate. This is what makes the next quick push deterministic.
+  */
+  state.seen =
+    snapshot
+      .map(
+        message =>
+          message.key
+      )
+      .filter(Boolean)
+      .slice(-120);
+
+  state.lastCreated =
+    snapshot.reduce(
+      (
+        max,
+        message
+      ) =>
+        Math.max(
+          max,
+          message.created || 0
+        ),
+      state.lastCreated || 0
+    );
+
+  const groupedLines =
+    state.lines.slice();
+
+  for(
+    const message of
+    newMessages
+  ) {
+    const text =
+      cleanText(
+        message.text
+      );
+
+    if(!text)
+      continue;
+
+    /*
+      Same text can legitimately be sent twice, so de-duplicate by key above,
+      not by body text. We still keep the final display compact to four lines.
+    */
+    groupedLines.push(
+      text
+    );
+  }
+
+  state.lines =
+    groupedLines
+      .slice(-4);
+
+  await saveConversationState(
+    friendship,
+    state
+  );
+
+  if(
+    state.lines.length === 0
+  ) {
+    return;
+  }
+
+  /*
+    SECOND: replace the SAME notification with the collected real texts.
+    Three rapid messages become one notification with three body lines.
+  */
+  await self.registration.showNotification(
+    title,
+    {
+      body:
+        groupedBody(
+          state.lines,
+          genericBody
+        ),
+      icon:
+        './splash_screens/icon.png',
+      tag,
+      data:
+        notificationData
+    }
+  );
+}
+
+function parsePushPayload(
+  event
+) {
+  let payload = {};
+
+  try {
+    payload =
+      event.data
+        ? event.data.json()
+        : {};
+  } catch {
+    try {
+      payload = {
+        body:
+          event.data
+            ? event.data.text()
+            : ''
+      };
+    } catch {
+      payload = {};
+    }
+  }
+
+  const data =
+    (
+      payload &&
+      typeof payload ===
+        'object' &&
+      payload.data &&
+      typeof payload.data ===
+        'object'
+    )
+      ? payload.data
+      : payload;
+
+  const notification =
+    (
+      payload &&
+      typeof payload ===
+        'object' &&
+      payload.notification &&
+      typeof payload.notification ===
+        'object'
+    )
+      ? payload.notification
+      : {};
+
+  const title =
+    cleanText(
+      data?.title ??
+      notification?.title ??
+      'Новое личное сообщение'
+    ) ||
+    'Новое личное сообщение';
+
+  const genericBody =
+    cleanText(
+      data?.body ??
+      notification?.body ??
+      'Вам написали в Бафии'
+    ) ||
+    'Новое личное сообщение';
+
+  const deeplinkUri =
+    data?.deeplinkUri ??
+    notification?.click_action ??
+    '';
+
+  const friendship =
+    privateChatFriendshipFromPush(
+      data,
+      notification
+    );
+
+  return {
+    data,
+    notification,
+    title,
+    genericBody,
+    deeplinkUri,
+    friendship
+  };
+}
+
 self.addEventListener(
   'push',
-  (event) => {
-    event.waitUntil(
-      (async() => {
-        let payload = {};
+  event => {
+    const parsed =
+      parsePushPayload(
+        event
+      );
 
-        try {
-          payload =
-            event.data
-              ? event.data.json()
-              : {};
-        } catch {
-          try {
-            payload = {
-              body:
-                event.data
-                  ? event.data.text()
-                  : ''
-            };
-          } catch {
-            payload = {};
+    if(!parsed.friendship) {
+      const notificationId =
+        cleanText(
+          parsed.data?.notificationId
+        );
+
+      event.waitUntil(
+        self.registration.showNotification(
+          parsed.title,
+          {
+            body:
+              parsed.genericBody,
+            icon:
+              './splash_screens/icon.png',
+            tag:
+              notificationId
+                ? `bafia-official-${notificationId}`
+                : 'bafia-official-message',
+            data: {
+              kind:
+                'bafia-official-push',
+              deeplinkUri:
+                parsed.deeplinkUri
+                  ? String(
+                      parsed.deeplinkUri
+                    )
+                  : undefined,
+              raw:
+                parsed.data
+            }
           }
-        }
+        )
+      );
 
-        const data =
-          (
-            payload &&
-            typeof payload ===
-              'object' &&
-            payload.data &&
-            typeof payload.data ===
-              'object'
-          )
-            ? payload.data
-            : payload;
+      return;
+    }
 
-        const notification =
-          (
-            payload &&
-            typeof payload ===
-              'object' &&
-            payload.notification &&
-            typeof payload.notification ===
-              'object'
-          )
-            ? payload.notification
-            : {};
+    const key =
+      parsed.friendship;
 
-        const title =
-          String(
-            data?.title ??
-            notification?.title ??
-            'Новое личное сообщение'
-          );
+    const previous =
+      conversationJobs.get(
+        key
+      ) ??
+      Promise.resolve();
 
-        const genericBody =
-          String(
-            data?.body ??
-            notification?.body ??
-            'Вам написали в Бафии'
-          );
-
-        const deeplinkUri =
-          data?.deeplinkUri ??
-          notification?.click_action ??
-          '';
-
-        const notificationId =
-          data?.notificationId ??
-          '';
-
-        const friendship =
-          privateChatFriendshipFromPush(
-            data,
-            notification
-          );
-
-        const tag =
-          notificationId
-            ? `bafia-official-${notificationId}`
-            : (
-                friendship
-                  ? `bafia-private-${friendship}`
-                  : 'bafia-official-private-message'
+    const job =
+      previous
+        .catch(() => {})
+        .then(
+          () =>
+            handlePrivatePush(
+              parsed
+            )
+        )
+        .finally(
+          () => {
+            if(
+              conversationJobs.get(
+                key
+              ) === job
+            ) {
+              conversationJobs.delete(
+                key
               );
-
-        const notificationData = {
-          kind:
-            'bafia-official-push',
-          friendship:
-            friendship ||
-            undefined,
-          deeplinkUri:
-            deeplinkUri
-              ? String(deeplinkUri)
-              : undefined,
-          raw:
-            data
-        };
-
-        /*
-          FIRST: use the exact simple notification path already confirmed on
-          the iPhone lock screen. We do this before any extra network work.
-        */
-        await self.registration.showNotification(
-          title,
-          {
-            body:
-              genericBody,
-            icon:
-              './splash_screens/icon.png',
-            tag,
-            data:
-              notificationData
+            }
           }
         );
 
-        if(!friendship)
-          return;
+    conversationJobs.set(
+      key,
+      job
+    );
 
-        /*
-          SECOND: while the same push event is still alive, ask the official
-          Mafia websocket for pcmsr and replace THIS SAME notification if the
-          newest incoming message text is available.
-        */
-        const actualBody =
-          await fetchLatestPrivateMessageBody(
-            friendship
-          );
-
-        if(
-          !actualBody ||
-          actualBody ===
-            cleanText(genericBody)
-        ) {
-          return;
-        }
-
-        await self.registration.showNotification(
-          title,
-          {
-            body:
-              actualBody,
-            icon:
-              './splash_screens/icon.png',
-            tag,
-            data:
-              notificationData
-          }
-        );
-      })()
+    event.waitUntil(
+      job
     );
   }
 );
 
 self.addEventListener(
   'notificationclick',
-  (event) => {
+  event => {
     event.notification.close();
 
     const notificationData =
-      event.notification.data || {};
+      event.notification.data ||
+      {};
 
     event.waitUntil(
       (async() => {
+        const friendship =
+          cleanText(
+            notificationData?.friendship
+          );
+
+        if(friendship) {
+          await clearConversationState(
+            friendship
+          );
+        }
+
         const windows =
           await self.clients.matchAll({
-            type: 'window',
-            includeUncontrolled: true
+            type:
+              'window',
+            includeUncontrolled:
+              true
           });
 
-        for(const client of windows) {
-          if('focus' in client) {
+        for(
+          const client of
+          windows
+        ) {
+          if(
+            'focus' in client
+          ) {
             await client.focus();
 
             client.postMessage({
@@ -654,7 +1214,9 @@ self.addEventListener(
           }
         }
 
-        if(self.clients.openWindow) {
+        if(
+          self.clients.openWindow
+        ) {
           const deeplinkUri =
             notificationData?.deeplinkUri ??
             notificationData?.raw?.deeplinkUri ??
@@ -666,7 +1228,9 @@ self.addEventListener(
 
             params.set(
               'bafiaPushDeeplink',
-              String(deeplinkUri)
+              String(
+                deeplinkUri
+              )
             );
 
             await self.clients.openWindow(

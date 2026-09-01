@@ -36605,15 +36605,20 @@ ${e2}`
             if (Date.now() - directNotificationAtNow < 12e3) {
               continue;
             }
+            const friendshipObjectId = row.entry?.[PacketDataKeys_default.OBJECT_ID] !== void 0 && row.entry?.[PacketDataKeys_default.OBJECT_ID] !== null ? String(
+              row.entry[PacketDataKeys_default.OBJECT_ID]
+            ) : "";
             await App_default2.showPrivateMessageNotification({
               title: username,
               body: preview || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
-              tag: `bafia-private-${playerObjectId}`,
+              /*
+                Official FCM push also uses friendship id.
+                One conversation => one OS notification.
+              */
+              tag: friendshipObjectId ? `bafia-private-${friendshipObjectId}` : `bafia-private-player-${playerObjectId}`,
               data: {
                 playerObjectId,
-                friendship: row.entry?.[PacketDataKeys_default.OBJECT_ID] !== void 0 && row.entry?.[PacketDataKeys_default.OBJECT_ID] !== null ? String(
-                  row.entry[PacketDataKeys_default.OBJECT_ID]
-                ) : void 0
+                friendship: friendshipObjectId || void 0
               }
             });
           }
@@ -36717,14 +36722,26 @@ ${e2}`
           const isSticker = Boolean(
             message?.[PacketDataKeys_default.MESSAGE_STICKER]
           );
-          const friendship = data2?.[PacketDataKeys_default.FRIENDSHIP] ?? (isSameOpenChat ? activeScreen?.friendObjectId : void 0);
+          let friendship = data2?.[PacketDataKeys_default.FRIENDSHIP] ?? (isSameOpenChat ? activeScreen?.friendObjectId : void 0);
+          if (friendship === void 0 || friendship === null || String(friendship) === "") {
+            const friendshipEntry = this.latestFriendshipEntries.find(
+              (entry) => {
+                const peer = entry?.[PacketDataKeys_default.FRIEND] ?? entry?.[PacketDataKeys_default.USER];
+                return String(
+                  peer?.[PacketDataKeys_default.PLAYER_OBJECT_ID] ?? ""
+                ) === senderPlayerObjectId;
+              }
+            );
+            friendship = friendshipEntry?.[PacketDataKeys_default.OBJECT_ID];
+          }
+          const friendshipObjectId = friendship !== void 0 && friendship !== null ? String(friendship) : "";
           const shown = await App_default2.showPrivateMessageNotification({
             title: senderUsername || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
             body: isSticker ? "\u0421\u0442\u0438\u043A\u0435\u0440" : text2 || "\u0412\u0430\u043C \u043D\u0430\u043F\u0438\u0441\u0430\u043B\u0438 \u0432 \u0411\u0430\u0444\u0438\u0438",
-            tag: `bafia-private-${senderPlayerObjectId}`,
+            tag: friendshipObjectId ? `bafia-private-${friendshipObjectId}` : `bafia-private-player-${senderPlayerObjectId}`,
             data: {
               playerObjectId: senderPlayerObjectId,
-              friendship: friendship !== void 0 && friendship !== null ? String(friendship) : void 0
+              friendship: friendshipObjectId || void 0
             }
           });
           if (shown) {
@@ -37680,6 +37697,14 @@ ${getLogs().join("\n")}
           */
         #privateMessageNotificationsStorageKey = "bafia.privateMessageNotifications";
         #notificationServiceWorkerRegistration;
+        #notificationServiceWorkerMessage = (event) => {
+          if (event.data?.type !== "bafia-notification-click") {
+            return;
+          }
+          void this.#openPrivateMessageNotification(
+            event.data?.data ?? {}
+          );
+        };
         #windowEvents = {
           popState: (e) => this.emit("popstate", e),
           focusOut: (e) => {
@@ -37743,6 +37768,7 @@ ${getLogs().join("\n")}
           this.#loadImgs();
           this.#initCommands();
           this.#initEvents();
+          this.#initNotificationClickHandling();
           void this.#ensureNotificationServiceWorker();
           Bafia_default.init();
           if (navigator.storage && navigator.storage.persist && (isIOS() || isMacOS())) {
@@ -37813,12 +37839,39 @@ ${getLogs().join("\n")}
             document.baseURI
           ).toString();
           try {
+            const tag = options.tag ?? "bafia-private-message";
+            const incomingBody = String(
+              options.body || "\u0412\u0430\u043C \u043D\u0430\u043F\u0438\u0441\u0430\u043B\u0438 \u0432 \u0411\u0430\u0444\u0438\u0438"
+            ).replace(/\s+/g, " ").trim();
+            let body = incomingBody;
+            try {
+              const existing = await registration.getNotifications({
+                tag
+              });
+              const previousBody = String(
+                existing[0]?.body ?? ""
+              ).trim();
+              if (previousBody) {
+                const lines = previousBody.split("\n").map(
+                  (line) => line.replace(/\s+/g, " ").trim()
+                ).filter(Boolean);
+                if (incomingBody && !lines.includes(
+                  incomingBody
+                )) {
+                  lines.push(
+                    incomingBody
+                  );
+                }
+                body = lines.slice(-4).join("\n") || incomingBody;
+              }
+            } catch {
+            }
             await registration.showNotification(
               options.title || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
               {
-                body: options.body || "\u0412\u0430\u043C \u043D\u0430\u043F\u0438\u0441\u0430\u043B\u0438 \u0432 \u0411\u0430\u0444\u0438\u0438",
+                body,
                 icon,
-                tag: options.tag ?? "bafia-private-message",
+                tag,
                 data: {
                   kind: "bafia-private-message",
                   ...options.data ?? {}
@@ -37832,6 +37885,77 @@ ${getLogs().join("\n")}
               error3
             );
             return false;
+          }
+        }
+        #initNotificationClickHandling() {
+          if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.addEventListener(
+              "message",
+              this.#notificationServiceWorkerMessage
+            );
+          }
+          const url = new URL(
+            window.location.href
+          );
+          const friendship = url.searchParams.get(
+            "bafiaPushFriendship"
+          );
+          const playerObjectId = url.searchParams.get(
+            "bafiaPushPlayer"
+          );
+          const deeplinkUri = url.searchParams.get(
+            "bafiaPushDeeplink"
+          );
+          if (!friendship && !playerObjectId && !deeplinkUri) {
+            return;
+          }
+          url.searchParams.delete(
+            "bafiaPushFriendship"
+          );
+          url.searchParams.delete(
+            "bafiaPushPlayer"
+          );
+          url.searchParams.delete(
+            "bafiaPushDeeplink"
+          );
+          window.history.replaceState(
+            window.history.state,
+            document.title,
+            `${url.pathname}${url.search}${url.hash}`
+          );
+          void this.#openPrivateMessageNotification({
+            friendship: friendship ?? void 0,
+            playerObjectId: playerObjectId ?? void 0,
+            deeplinkUri: deeplinkUri ?? void 0
+          });
+        }
+        async #openPrivateMessageNotification(data2) {
+          for (let attempt = 0; attempt < 48; attempt++) {
+            if (this.server && this.user?.objectId && this.user?.token && this.server.webSocket?.readyState === WebSocket.OPEN) {
+              break;
+            }
+            await new Promise(
+              (resolve) => window.setTimeout(
+                resolve,
+                250
+              )
+            );
+          }
+          if (!this.server || !this.user?.objectId || !this.user?.token || this.server.webSocket?.readyState !== WebSocket.OPEN) {
+            console.warn(
+              "Could not open private chat from notification: app is not authenticated yet",
+              data2
+            );
+            return;
+          }
+          const opened = await this.server.openPrivateChatFromNotification(
+            data2
+          );
+          if (!opened) {
+            console.warn(
+              "Could not resolve private chat from notification",
+              data2
+            );
           }
         }
         async #ensureNotificationServiceWorker() {
@@ -38032,6 +38156,12 @@ ${getLogs().join("\n")}
         }
         #destroyEvents() {
           this.removeAllEvents();
+          if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.removeEventListener(
+              "message",
+              this.#notificationServiceWorkerMessage
+            );
+          }
           window.removeEventListener("popstate", this.#windowEvents.popState);
           window.removeEventListener("focusout", this.#windowEvents.focusOut);
           window.removeEventListener(
