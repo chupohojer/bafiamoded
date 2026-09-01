@@ -229,6 +229,35 @@ export default class Settings extends Screen{
         }
       );
 
+    addButton(
+      'Тест уведомления',
+      'Отправить',
+      async() => {
+        if(
+          !App.privateMessageNotificationsEnabled
+        ) {
+          await MessageBox(
+            'Сначала включите уведомления о личных сообщениях.'
+          );
+          return;
+        }
+
+        const shown =
+          await App.showPrivateMessageNotification({
+            title:
+              'Bafia Online',
+            body:
+              'Тестовое уведомление работает.'
+          });
+
+        if(!shown) {
+          await MessageBox(
+            'Тестовое уведомление не удалось показать. Значит проблема пока в Notification/Service Worker, а не в личных сообщениях.'
+          );
+        }
+      }
+    );
+
     addButton('Оформление', 'Настроить', () => MessageBox('Скоро.. Скоро.. Скоро.. Скоро.. Скоро.. Скоро.. Скоро..'));
     addButton('Язык сервера', 'Выбрать', () => {
       const box = new Box({ title: 'ЯЗЫК СЕРВЕРА', width: 325, height: 255, canCloseAnywhere: true });
