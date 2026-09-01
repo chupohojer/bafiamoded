@@ -55,10 +55,31 @@ export default class Server extends Events<ServerEvents> {
   private notifiedPrivateMessageIds =
     new Set<string>();
 
+  /*
+    Stage 1.5 private-message detection.
+
+    The live server does not send pcmr globally when a PrivateChat is not
+    subscribed, but FRIENDSHIP_LIST snapshots contain NEW_MESSAGES (nm).
+    We keep a baseline per friend and only notify when that unread count grows.
+  */
+  private privateMessageUnreadCounts =
+    new Map<string, number>();
+
+  private privateMessageUnreadBaselineReady =
+    false;
+
+  private privateMessageUnreadPollTimer?:
+    number;
+
+  private recentDirectPrivateNotificationAt =
+    new Map<string, number>();
+
   constructor(){
     super();
 
     this.on('close', async(ip) => {
+      this.stopPrivateMessageUnreadPolling();
+
       if(!this.isReconnectingEnabled) return;
       this.logger.info(`Connection is closed.. Reconnecting in 1 second..`);
       await wait(50);
@@ -106,6 +127,306 @@ export default class Server extends Events<ServerEvents> {
       if(json[PacketDataKeys.TYPE] == 'usi' || (PacketDataKeys.TOKEN in json && PacketDataKeys.USER_OBJECT_ID in json)) delete log[PacketDataKeys.USER_ID][PacketDataKeys.TOKEN];
       this.logger.info(log);
     });
+  }
+
+  private friendshipListEntries(
+    data: any
+  ): any[] | null {
+    if(
+      data?.[
+        PacketDataKeys.TYPE
+      ] !== PacketDataKeys.FRIENDSHIP_LIST
+    ) {
+      return null;
+    }
+
+    const payload =
+      data?.[
+        PacketDataKeys.FRIENDSHIP_LIST
+      ];
+
+    const entries =
+      Array.isArray(payload)
+        ? payload
+        : payload?.[
+            PacketDataKeys.FRIENDSHIP_LIST
+          ];
+
+    return Array.isArray(entries)
+      ? entries
+      : null;
+  }
+
+  private isPendingFriendship(
+    entry: any
+  ) {
+    const accepted =
+      entry?.[
+        PacketDataKeys.ACCEPTED
+      ];
+
+    return (
+      accepted === 0 ||
+      accepted === false ||
+      accepted === '0'
+    );
+  }
+
+  private async handleFriendshipUnreadNotification(
+    data: any
+  ) {
+    const entries =
+      this.friendshipListEntries(
+        data
+      );
+
+    if(!entries)
+      return;
+
+    /*
+      gsfrl (friend requests) answers with the same FRIENDSHIP_LIST packet
+      type. A pending-only snapshot must never reset the unread-message
+      baseline, otherwise the next normal snapshot could notify duplicates.
+    */
+    const acceptedEntries =
+      entries.filter(
+        entry =>
+          !this.isPendingFriendship(
+            entry
+          )
+      );
+
+    if(
+      entries.length > 0 &&
+      acceptedEntries.length === 0
+    ) {
+      return;
+    }
+
+    const nextCounts =
+      new Map<string, number>();
+
+    for(const entry of acceptedEntries) {
+      const peer =
+        entry?.[
+          PacketDataKeys.FRIEND
+        ] ??
+        entry?.[
+          PacketDataKeys.USER
+        ];
+
+      const playerObjectId =
+        String(
+          peer?.[
+            PacketDataKeys.PLAYER_OBJECT_ID
+          ] ??
+          ''
+        );
+
+      if(!playerObjectId)
+        continue;
+
+      const unreadRaw =
+        Number(
+          entry?.[
+            PacketDataKeys.NEW_MESSAGES
+          ] ??
+          0
+        );
+
+      const unread =
+        Number.isFinite(unreadRaw)
+          ? Math.max(
+              0,
+              unreadRaw
+            )
+          : 0;
+
+      nextCounts.set(
+        playerObjectId,
+        unread
+      );
+
+      if(
+        !this.privateMessageUnreadBaselineReady
+      ) {
+        continue;
+      }
+
+      const previousUnread =
+        this.privateMessageUnreadCounts.get(
+          playerObjectId
+        );
+
+      /*
+        A friend that appears for the first time establishes its own baseline.
+        We never notify for old unread messages that existed before monitoring.
+      */
+      if(previousUnread === undefined)
+        continue;
+
+      if(unread <= previousUnread)
+        continue;
+
+      const activeScreen =
+        App.screen as any;
+
+      const sameVisibleChat =
+        document.visibilityState ===
+          'visible' &&
+        activeScreen?.name ===
+          'PrivateChat' &&
+        String(
+          activeScreen?.friendUserObjectId ??
+          ''
+        ) === playerObjectId;
+
+      if(sameVisibleChat)
+        continue;
+
+      /*
+        If pcmr was delivered for this same sender, that path already showed
+        the richer notification with the actual message text. Suppress only
+        the immediate unread-counter echo from the friendship snapshot.
+      */
+      const directNotificationAt =
+        this.recentDirectPrivateNotificationAt.get(
+          playerObjectId
+        ) ??
+        0;
+
+      if(
+        Date.now() -
+          directNotificationAt <
+        12_000
+      ) {
+        continue;
+      }
+
+      const username =
+        String(
+          peer?.[
+            PacketDataKeys.USERNAME
+          ] ??
+          'Новое личное сообщение'
+        ).trim() ||
+        'Новое личное сообщение';
+
+      const delta =
+        unread - previousUnread;
+
+      await App.showPrivateMessageNotification({
+        title:
+          username,
+
+        body:
+          delta > 1
+            ? `Новых сообщений: ${delta}`
+            : 'Новое личное сообщение',
+
+        tag:
+          `bafia-private-${playerObjectId}`,
+
+        data: {
+          playerObjectId,
+
+          friendship:
+            entry?.[
+              PacketDataKeys.OBJECT_ID
+            ] !== undefined &&
+            entry?.[
+              PacketDataKeys.OBJECT_ID
+            ] !== null
+              ? String(
+                  entry[
+                    PacketDataKeys.OBJECT_ID
+                  ]
+                )
+              : undefined
+        }
+      });
+    }
+
+    this.privateMessageUnreadCounts =
+      nextCounts;
+
+    this.privateMessageUnreadBaselineReady =
+      true;
+  }
+
+  private stopPrivateMessageUnreadPolling() {
+    if(
+      this.privateMessageUnreadPollTimer !==
+      undefined
+    ) {
+      window.clearTimeout(
+        this.privateMessageUnreadPollTimer
+      );
+
+      this.privateMessageUnreadPollTimer =
+        undefined;
+    }
+  }
+
+  private startPrivateMessageUnreadPolling() {
+    this.stopPrivateMessageUnreadPolling();
+
+    const poll = () => {
+      this.privateMessageUnreadPollTimer =
+        window.setTimeout(
+          poll,
+          5000
+        );
+
+      /*
+        Friends already polls acfl every 3 seconds and its responses also pass
+        through the global Server message listener. Do not send a competing
+        acfl request there because gsfrl uses the same response packet type.
+      */
+      if(
+        (App.screen as any)?.name ===
+          'Friends'
+      ) {
+        return;
+      }
+
+      if(
+        !App.privateMessageNotificationsEnabled ||
+        !App.user?.objectId ||
+        !App.user?.token ||
+        this.webSocket?.readyState !==
+          WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      try {
+        this.send(
+          PacketDataKeys.ADD_CLIENT_TO_FRIENDSHIP_LIST,
+          {
+            [PacketDataKeys.USER_OBJECT_ID]:
+              App.user.objectId,
+
+            [PacketDataKeys.TOKEN]:
+              App.user.token
+          }
+        );
+      } catch {
+        /*
+          Reconnect/temporary network errors are harmless.
+          The next 5-second pass retries.
+        */
+      }
+    };
+
+    /*
+      Give authentication and the first screen a moment to settle.
+    */
+    this.privateMessageUnreadPollTimer =
+      window.setTimeout(
+        poll,
+        1500
+      );
   }
 
   private async handlePrivateMessageNotification(
@@ -294,35 +615,43 @@ export default class Server extends Events<ServerEvents> {
           : undefined
       );
 
-    await App.showPrivateMessageNotification({
-      title:
-        senderUsername ||
-        'Новое личное сообщение',
+    const shown =
+      await App.showPrivateMessageNotification({
+        title:
+          senderUsername ||
+          'Новое личное сообщение',
 
-      body:
-        isSticker
-          ? 'Стикер'
-          : (
-              text ||
-              'Вам написали в Бафии'
-            ),
+        body:
+          isSticker
+            ? 'Стикер'
+            : (
+                text ||
+                'Вам написали в Бафии'
+              ),
 
-      tag:
-        `bafia-private-${
-          senderPlayerObjectId
-        }`,
+        tag:
+          `bafia-private-${
+            senderPlayerObjectId
+          }`,
 
-      data: {
-        playerObjectId:
-          senderPlayerObjectId,
+        data: {
+          playerObjectId:
+            senderPlayerObjectId,
 
-        friendship:
-          friendship !== undefined &&
-          friendship !== null
-            ? String(friendship)
-            : undefined
-      }
-    });
+          friendship:
+            friendship !== undefined &&
+            friendship !== null
+              ? String(friendship)
+              : undefined
+        }
+      });
+
+    if(shown) {
+      this.recentDirectPrivateNotificationAt.set(
+        senderPlayerObjectId,
+        Date.now()
+      );
+    }
   }
 
   private async handleRoomInvitation(
@@ -429,6 +758,8 @@ export default class Server extends Events<ServerEvents> {
       App.screen = new Authorization();
     }
 
+    this.startPrivateMessageUnreadPolling();
+
     this.on('message', async data => {
       this.lastPacket = null;
       this.lastPacket = data;
@@ -438,6 +769,10 @@ export default class Server extends Events<ServerEvents> {
         which Screen is currently open, as long as this websocket/PWA is alive.
       */
       void this.handlePrivateMessageNotification(
+        data
+      );
+
+      void this.handleFriendshipUnreadNotification(
         data
       );
 
@@ -591,6 +926,7 @@ export default class Server extends Events<ServerEvents> {
   }
 
   destroy(){
+    this.stopPrivateMessageUnreadPolling();
     this.removeAllEvents();
     this.webSocket.close();
   }

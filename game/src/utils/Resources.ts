@@ -71,7 +71,6 @@ function processQueue() {
     activeRequests++;
 
     const img = new Image();
-    img.referrerPolicy = 'no-referrer';
     let finished = false;
 
     const finish = (
@@ -365,7 +364,6 @@ function loadImageDirect(
 ): Promise<string | null> {
   return new Promise(resolve => {
     const img = new Image();
-    img.referrerPolicy = 'no-referrer';
     let finished = false;
 
     const finish = (

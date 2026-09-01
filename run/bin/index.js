@@ -35814,9 +35814,21 @@ ${e2}`
       known private message only to update ACCEPTED/read state.
     */
     notifiedPrivateMessageIds = /* @__PURE__ */ new Set();
+    /*
+        Stage 1.5 private-message detection.
+    
+        The live server does not send pcmr globally when a PrivateChat is not
+        subscribed, but FRIENDSHIP_LIST snapshots contain NEW_MESSAGES (nm).
+        We keep a baseline per friend and only notify when that unread count grows.
+      */
+    privateMessageUnreadCounts = /* @__PURE__ */ new Map();
+    privateMessageUnreadBaselineReady = false;
+    privateMessageUnreadPollTimer;
+    recentDirectPrivateNotificationAt = /* @__PURE__ */ new Map();
     constructor() {
       super();
       this.on("close", async (ip) => {
+        this.stopPrivateMessageUnreadPolling();
         if (!this.isReconnectingEnabled) return;
         this.logger.info(`Connection is closed.. Reconnecting in 1 second..`);
         await wait(50);
@@ -35854,6 +35866,129 @@ ${e2}`
         if (json[PacketDataKeys_default.TYPE] == "usi" || PacketDataKeys_default.TOKEN in json && PacketDataKeys_default.USER_OBJECT_ID in json) delete log[PacketDataKeys_default.USER_ID][PacketDataKeys_default.TOKEN];
         this.logger.info(log);
       });
+    }
+    friendshipListEntries(data2) {
+      if (data2?.[PacketDataKeys_default.TYPE] !== PacketDataKeys_default.FRIENDSHIP_LIST) {
+        return null;
+      }
+      const payload = data2?.[PacketDataKeys_default.FRIENDSHIP_LIST];
+      const entries2 = Array.isArray(payload) ? payload : payload?.[PacketDataKeys_default.FRIENDSHIP_LIST];
+      return Array.isArray(entries2) ? entries2 : null;
+    }
+    isPendingFriendship(entry) {
+      const accepted = entry?.[PacketDataKeys_default.ACCEPTED];
+      return accepted === 0 || accepted === false || accepted === "0";
+    }
+    async handleFriendshipUnreadNotification(data2) {
+      const entries2 = this.friendshipListEntries(
+        data2
+      );
+      if (!entries2)
+        return;
+      const acceptedEntries = entries2.filter(
+        (entry) => !this.isPendingFriendship(
+          entry
+        )
+      );
+      if (entries2.length > 0 && acceptedEntries.length === 0) {
+        return;
+      }
+      const nextCounts = /* @__PURE__ */ new Map();
+      for (const entry of acceptedEntries) {
+        const peer = entry?.[PacketDataKeys_default.FRIEND] ?? entry?.[PacketDataKeys_default.USER];
+        const playerObjectId = String(
+          peer?.[PacketDataKeys_default.PLAYER_OBJECT_ID] ?? ""
+        );
+        if (!playerObjectId)
+          continue;
+        const unreadRaw = Number(
+          entry?.[PacketDataKeys_default.NEW_MESSAGES] ?? 0
+        );
+        const unread = Number.isFinite(unreadRaw) ? Math.max(
+          0,
+          unreadRaw
+        ) : 0;
+        nextCounts.set(
+          playerObjectId,
+          unread
+        );
+        if (!this.privateMessageUnreadBaselineReady) {
+          continue;
+        }
+        const previousUnread = this.privateMessageUnreadCounts.get(
+          playerObjectId
+        );
+        if (previousUnread === void 0)
+          continue;
+        if (unread <= previousUnread)
+          continue;
+        const activeScreen = App_default2.screen;
+        const sameVisibleChat = document.visibilityState === "visible" && activeScreen?.name === "PrivateChat" && String(
+          activeScreen?.friendUserObjectId ?? ""
+        ) === playerObjectId;
+        if (sameVisibleChat)
+          continue;
+        const directNotificationAt = this.recentDirectPrivateNotificationAt.get(
+          playerObjectId
+        ) ?? 0;
+        if (Date.now() - directNotificationAt < 12e3) {
+          continue;
+        }
+        const username = String(
+          peer?.[PacketDataKeys_default.USERNAME] ?? "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435"
+        ).trim() || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435";
+        const delta = unread - previousUnread;
+        await App_default2.showPrivateMessageNotification({
+          title: username,
+          body: delta > 1 ? `\u041D\u043E\u0432\u044B\u0445 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439: ${delta}` : "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
+          tag: `bafia-private-${playerObjectId}`,
+          data: {
+            playerObjectId,
+            friendship: entry?.[PacketDataKeys_default.OBJECT_ID] !== void 0 && entry?.[PacketDataKeys_default.OBJECT_ID] !== null ? String(
+              entry[PacketDataKeys_default.OBJECT_ID]
+            ) : void 0
+          }
+        });
+      }
+      this.privateMessageUnreadCounts = nextCounts;
+      this.privateMessageUnreadBaselineReady = true;
+    }
+    stopPrivateMessageUnreadPolling() {
+      if (this.privateMessageUnreadPollTimer !== void 0) {
+        window.clearTimeout(
+          this.privateMessageUnreadPollTimer
+        );
+        this.privateMessageUnreadPollTimer = void 0;
+      }
+    }
+    startPrivateMessageUnreadPolling() {
+      this.stopPrivateMessageUnreadPolling();
+      const poll = () => {
+        this.privateMessageUnreadPollTimer = window.setTimeout(
+          poll,
+          5e3
+        );
+        if (App_default2.screen?.name === "Friends") {
+          return;
+        }
+        if (!App_default2.privateMessageNotificationsEnabled || !App_default2.user?.objectId || !App_default2.user?.token || this.webSocket?.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        try {
+          this.send(
+            PacketDataKeys_default.ADD_CLIENT_TO_FRIENDSHIP_LIST,
+            {
+              [PacketDataKeys_default.USER_OBJECT_ID]: App_default2.user.objectId,
+              [PacketDataKeys_default.TOKEN]: App_default2.user.token
+            }
+          );
+        } catch {
+        }
+      };
+      this.privateMessageUnreadPollTimer = window.setTimeout(
+        poll,
+        1500
+      );
     }
     async handlePrivateMessageNotification(data2) {
       if (data2?.[PacketDataKeys_default.TYPE] !== "pcmr") {
@@ -35918,7 +36053,7 @@ ${e2}`
         message?.[PacketDataKeys_default.MESSAGE_STICKER]
       );
       const friendship = data2?.[PacketDataKeys_default.FRIENDSHIP] ?? (isSameOpenChat ? activeScreen?.friendObjectId : void 0);
-      await App_default2.showPrivateMessageNotification({
+      const shown = await App_default2.showPrivateMessageNotification({
         title: senderUsername || "\u041D\u043E\u0432\u043E\u0435 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435",
         body: isSticker ? "\u0421\u0442\u0438\u043A\u0435\u0440" : text2 || "\u0412\u0430\u043C \u043D\u0430\u043F\u0438\u0441\u0430\u043B\u0438 \u0432 \u0411\u0430\u0444\u0438\u0438",
         tag: `bafia-private-${senderPlayerObjectId}`,
@@ -35927,6 +36062,12 @@ ${e2}`
           friendship: friendship !== void 0 && friendship !== null ? String(friendship) : void 0
         }
       });
+      if (shown) {
+        this.recentDirectPrivateNotificationAt.set(
+          senderPlayerObjectId,
+          Date.now()
+        );
+      }
     }
     async handleRoomInvitation(payload) {
       if (!payload)
@@ -35974,10 +36115,14 @@ ${e2}`
       } else {
         App_default2.screen = new Authorization();
       }
+      this.startPrivateMessageUnreadPolling();
       this.on("message", async (data2) => {
         this.lastPacket = null;
         this.lastPacket = data2;
         void this.handlePrivateMessageNotification(
+          data2
+        );
+        void this.handleFriendshipUnreadNotification(
           data2
         );
         const rilsPayload = data2?.[PacketDataKeys_default.ROOM_IN_LOBBY_STATE];
@@ -36091,6 +36236,7 @@ ${format_default(tsr, "genitive")}`, { height: 250 });
       });
     }
     destroy() {
+      this.stopPrivateMessageUnreadPolling();
       this.removeAllEvents();
       this.webSocket.close();
     }
@@ -36899,7 +37045,6 @@ ${getLogs().join("\n")}
         return;
       activeRequests++;
       const img = new Image();
-      img.referrerPolicy = "no-referrer";
       let finished = false;
       const finish = (result) => {
         if (finished) return;
@@ -37053,7 +37198,6 @@ ${getLogs().join("\n")}
   function loadImageDirect(url, timeoutMs = 5e3) {
     return new Promise((resolve) => {
       const img = new Image();
-      img.referrerPolicy = "no-referrer";
       let finished = false;
       const finish = (result) => {
         if (finished) return;
