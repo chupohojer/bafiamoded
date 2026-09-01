@@ -1451,21 +1451,21 @@ export default class Server extends Events<ServerEvents> {
           'bafia.officialCloudMessagingTokenUser'
         );
 
-      if(
+      const wasAlreadySaved =
         savedToken === cloudMessagingToken &&
         savedForUser ===
           String(
             App.user.objectId ??
             ''
-          )
-      ) {
-        /*
-          It was already acknowledged by the official server for this account.
-          Nothing to resend on every reconnect.
-        */
-        return;
-      }
+          );
 
+      /*
+        IMPORTANT:
+        Re-send ncmt once on every authenticated websocket connection even if
+        Firebase returned the same token. Updating/replacing the service worker
+        can leave a previously stored server-side binding stale on iOS. The
+        official server safely acknowledges the current token with cmts.
+      */
       const responsePromise =
         this.awaitPacket(
           'cmts',
@@ -1500,9 +1500,11 @@ export default class Server extends Events<ServerEvents> {
         )
       );
 
-      this.reportOfficialCloudMessagingProbe(
-        'Официальный сервер принял Web FCM token и ответил cmts. Теперь полностью заблокируй iPhone и отправь этому аккаунту личное сообщение с другого аккаунта.'
-      );
+      if(!wasAlreadySaved) {
+        this.reportOfficialCloudMessagingProbe(
+          'Официальный сервер принял Web FCM token и ответил cmts. Теперь полностью заблокируй iPhone и отправь этому аккаунту личное сообщение с другого аккаунта.'
+        );
+      }
     } catch(error) {
       console.error(
         'Official FCM Web probe failed',
