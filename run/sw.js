@@ -11,6 +11,13 @@ const PUSH_CONVERSATION_CACHE =
   'bafia-push-conversations-v1';
 
 /*
+  Only message texts created very recently are eligible for a notification.
+  Old unread chat history must never "bubble up" into a new lock-screen push.
+*/
+const FRESH_MESSAGE_WINDOW_MS =
+  30_000;
+
+/*
   Burst pushes from the same person are serialized inside one SW lifetime.
   This is important when 2-3 FCM pushes arrive almost simultaneously: without
   it they open several Mafia WebSockets at once and race for the same pcmsr.
@@ -849,41 +856,38 @@ async function handlePrivatePush(
         state.seen
       );
 
-    let unseen = [];
-
-    if(seen.size > 0) {
-      unseen =
-        snapshot.filter(
-          message =>
-            !seen.has(
-              message.key
-            )
-        );
-    } else {
-      /*
-        First successful fetch after installing/updating the worker:
-        do not dump old chat history into notifications.
-      */
-      const recentThreshold =
-        Date.now() -
-        30_000;
-
-      const recent =
-        snapshot.filter(
-          message =>
-            message.created &&
-            message.created >=
-              recentThreshold
-        );
-
-      unseen =
-        recent.length
-          ? recent
-          : snapshot.slice(-1);
-    }
+    const recentThreshold =
+      Date.now() -
+      FRESH_MESSAGE_WINDOW_MS;
 
     /*
-      Add all newly discovered messages to a persistent FIFO queue.
+      Hard freshness rule:
+      - old unread messages may stay in pcmsr forever;
+      - they are still remembered in `seen`;
+      - but they are NEVER allowed into the notification text queue.
+
+      A message without a usable CREATED timestamp is also skipped here.
+      In that case we prefer the safe generic "Новое сообщение" fallback over
+      showing some random old unread text.
+    */
+    const freshSnapshot =
+      snapshot.filter(
+        message =>
+          message.created &&
+          message.created >=
+            recentThreshold
+      );
+
+    const unseen =
+      freshSnapshot.filter(
+        message =>
+          !seen.has(
+            message.key
+          )
+      );
+
+    /*
+      Add all newly discovered FRESH messages to a persistent FIFO queue.
 
       Example:
         three FCM pushes arrive very fast;
@@ -892,9 +896,21 @@ async function handlePrivatePush(
         second push consumes B,
         third push consumes C.
 
-      This is much more deterministic than showing the whole history on every
-      notification.
+      Old unread messages outside the 30-second window are ignored.
     */
+    /*
+      Pending survives across service-worker wakeups. Drop anything that is no
+      longer fresh before this push can consume it.
+    */
+    state.pending =
+      state.pending.filter(
+        item =>
+          Number(
+            item?.created
+          ) >=
+            recentThreshold
+      );
+
     const pendingKeys =
       new Set(
         state.pending.map(
