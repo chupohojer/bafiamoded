@@ -82,6 +82,18 @@ export default class Server extends Events<ServerEvents> {
   private lastPrivateMessageUnreadSnapshotAt =
     0;
 
+  /*
+    Temporary diagnostic for Stage 2:
+    try to obtain an FCM Web registration token for the SAME Firebase project
+    used by the official Android client, then register it through the exact
+    native protocol: { ty: 'ncmt', t: <FCM token> } -> 'cmts'.
+
+    If this works on the iPhone PWA, the official Mafia backend can potentially
+    wake our service worker even while the screen is locked.
+  */
+  private officialCloudMessagingProbeReported =
+    false;
+
   constructor(){
     super();
 
@@ -979,6 +991,224 @@ export default class Server extends Events<ServerEvents> {
     }
   }
 
+  private reportOfficialCloudMessagingProbe(
+    message: string
+  ) {
+    if(
+      this.officialCloudMessagingProbeReported
+    ) {
+      return;
+    }
+
+    this.officialCloudMessagingProbeReported =
+      true;
+
+    void MessageBox(
+      message,
+      {
+        title:
+          'PUSH ПРИ БЛОКИРОВКЕ',
+        height:
+          220
+      }
+    );
+  }
+
+  private async tryRegisterOfficialCloudMessagingToken() {
+    if(
+      !App.privateMessageNotificationsEnabled ||
+      !window.isSecureContext ||
+      !('Notification' in window) ||
+      Notification.permission !== 'granted' ||
+      !('serviceWorker' in navigator)
+    ) {
+      return;
+    }
+
+    /*
+      Values below are public Firebase client configuration extracted from the
+      official Mafia Online APK supplied for protocol research. No private
+      server key / service-account credential is present here.
+    */
+    const firebaseConfig = {
+      apiKey:
+        'AIzaSyDKCD-m3gkBKieE5qXJkfx7zhxPGV8AAuI',
+      appId:
+        '1:1030207029768:android:dba8050cf5a28a4c',
+      messagingSenderId:
+        '1030207029768',
+      projectId:
+        'mafia-online-game',
+      storageBucket:
+        'mafia-online-game.appspot.com'
+    };
+
+    try {
+      /*
+        Keep Firebase optional: do not add a package dependency and do not make
+        normal Bafia startup depend on Google. The browser imports these only
+        when notifications are already enabled.
+      */
+      const firebaseAppModuleUrl =
+        'https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js';
+
+      const firebaseMessagingModuleUrl =
+        'https://www.gstatic.com/firebasejs/12.18.0/firebase-messaging.js';
+
+      const firebaseAppModule: any =
+        await import(
+          firebaseAppModuleUrl
+        );
+
+      const firebaseMessagingModule: any =
+        await import(
+          firebaseMessagingModuleUrl
+        );
+
+      const supported =
+        await firebaseMessagingModule.isSupported();
+
+      if(!supported) {
+        this.reportOfficialCloudMessagingProbe(
+          'Firebase Web Messaging сообщил, что этот iPhone/PWA не поддерживается. Тогда официальный FCM-путь отпадает и пойдём через обычный Web Push bridge.'
+        );
+        return;
+      }
+
+      const appName =
+        'bafia-official-push';
+
+      const existingApp =
+        firebaseAppModule
+          .getApps()
+          .find(
+            (app: any) =>
+              app.name === appName
+          );
+
+      const firebaseApp =
+        existingApp ??
+        firebaseAppModule.initializeApp(
+          firebaseConfig,
+          appName
+        );
+
+      const messaging =
+        firebaseMessagingModule.getMessaging(
+          firebaseApp
+        );
+
+      /*
+        We deliberately give Firebase our EXISTING sw.js registration.
+        No second firebase-messaging-sw.js is created, so avatar/network
+        behavior stays untouched.
+      */
+      const registration =
+        await navigator.serviceWorker.ready;
+
+      /*
+        The APK does not contain a Web VAPID public key. Firebase's API permits
+        getToken() without one and then uses the project's default VAPID key.
+        This is exactly what this probe is testing.
+      */
+      const cloudMessagingToken =
+        String(
+          await firebaseMessagingModule.getToken(
+            messaging,
+            {
+              serviceWorkerRegistration:
+                registration
+            }
+          ) ??
+          ''
+        ).trim();
+
+      if(!cloudMessagingToken) {
+        this.reportOfficialCloudMessagingProbe(
+          'Firebase не выдал Web FCM token. Текущие уведомления не сломаны; просто официальный push-путь пока не подключился.'
+        );
+        return;
+      }
+
+      const savedToken =
+        localStorage.getItem(
+          'bafia.officialCloudMessagingToken'
+        );
+
+      const savedForUser =
+        localStorage.getItem(
+          'bafia.officialCloudMessagingTokenUser'
+        );
+
+      if(
+        savedToken === cloudMessagingToken &&
+        savedForUser ===
+          String(
+            App.user.objectId ??
+            ''
+          )
+      ) {
+        /*
+          It was already acknowledged by the official server for this account.
+          Nothing to resend on every reconnect.
+        */
+        return;
+      }
+
+      const responsePromise =
+        this.awaitPacket(
+          'cmts',
+          8000
+        );
+
+      /*
+        Decompiled official Android logic:
+          HashMap["ty"] = "ncmt"
+          HashMap["t"]  = FirebaseMessaging.getToken()
+      */
+      this.send(
+        'ncmt',
+        {
+          [PacketDataKeys.TOKEN]:
+            cloudMessagingToken
+        }
+      );
+
+      await responsePromise;
+
+      localStorage.setItem(
+        'bafia.officialCloudMessagingToken',
+        cloudMessagingToken
+      );
+
+      localStorage.setItem(
+        'bafia.officialCloudMessagingTokenUser',
+        String(
+          App.user.objectId ??
+          ''
+        )
+      );
+
+      this.reportOfficialCloudMessagingProbe(
+        'Официальный сервер принял Web FCM token и ответил cmts. Теперь полностью заблокируй iPhone и отправь этому аккаунту личное сообщение с другого аккаунта.'
+      );
+    } catch(error) {
+      console.error(
+        'Official FCM Web probe failed',
+        error
+      );
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      this.reportOfficialCloudMessagingProbe(
+        `Официальный FCM-путь не зарегистрировался:\n${message}\n\nОбычные уведомления Бафии продолжают работать. По этой ошибке решим, можно ли использовать родной Firebase или нужен Web Push bridge.`
+      );
+    }
+  }
+
   async #init(){
     this.call('connect');
     this.logger.info(`Connected to server`);
@@ -1110,6 +1340,15 @@ export default class Server extends Events<ServerEvents> {
         }
       }
     });
+
+    if(App.config.auth) {
+      window.setTimeout(
+        () => {
+          void this.tryRegisterOfficialCloudMessagingToken();
+        },
+        1500
+      );
+    }
   }
 
   send(data: object): void

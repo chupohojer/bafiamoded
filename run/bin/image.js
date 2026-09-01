@@ -36258,6 +36258,16 @@ ${e2}`
       old notifications. A long gap makes the next snapshot a new baseline.
     */
     lastPrivateMessageUnreadSnapshotAt = 0;
+    /*
+        Temporary diagnostic for Stage 2:
+        try to obtain an FCM Web registration token for the SAME Firebase project
+        used by the official Android client, then register it through the exact
+        native protocol: { ty: 'ncmt', t: <FCM token> } -> 'cmts'.
+    
+        If this works on the iPhone PWA, the official Mafia backend can potentially
+        wake our service worker even while the screen is locked.
+      */
+    officialCloudMessagingProbeReported = false;
     constructor() {
       super();
       this.on("close", async (ip) => {
@@ -36627,6 +36637,117 @@ ${e2}`
         }
       }
     }
+    reportOfficialCloudMessagingProbe(message) {
+      if (this.officialCloudMessagingProbeReported) {
+        return;
+      }
+      this.officialCloudMessagingProbeReported = true;
+      void MessageBox_default(
+        message,
+        {
+          title: "PUSH \u041F\u0420\u0418 \u0411\u041B\u041E\u041A\u0418\u0420\u041E\u0412\u041A\u0415",
+          height: 220
+        }
+      );
+    }
+    async tryRegisterOfficialCloudMessagingToken() {
+      if (!App_default.privateMessageNotificationsEnabled || !window.isSecureContext || !("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator)) {
+        return;
+      }
+      const firebaseConfig = {
+        apiKey: "AIzaSyDKCD-m3gkBKieE5qXJkfx7zhxPGV8AAuI",
+        appId: "1:1030207029768:android:dba8050cf5a28a4c",
+        messagingSenderId: "1030207029768",
+        projectId: "mafia-online-game",
+        storageBucket: "mafia-online-game.appspot.com"
+      };
+      try {
+        const firebaseAppModuleUrl = "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+        const firebaseMessagingModuleUrl = "https://www.gstatic.com/firebasejs/12.18.0/firebase-messaging.js";
+        const firebaseAppModule = await import(firebaseAppModuleUrl);
+        const firebaseMessagingModule = await import(firebaseMessagingModuleUrl);
+        const supported = await firebaseMessagingModule.isSupported();
+        if (!supported) {
+          this.reportOfficialCloudMessagingProbe(
+            "Firebase Web Messaging \u0441\u043E\u043E\u0431\u0449\u0438\u043B, \u0447\u0442\u043E \u044D\u0442\u043E\u0442 iPhone/PWA \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F. \u0422\u043E\u0433\u0434\u0430 \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 FCM-\u043F\u0443\u0442\u044C \u043E\u0442\u043F\u0430\u0434\u0430\u0435\u0442 \u0438 \u043F\u043E\u0439\u0434\u0451\u043C \u0447\u0435\u0440\u0435\u0437 \u043E\u0431\u044B\u0447\u043D\u044B\u0439 Web Push bridge."
+          );
+          return;
+        }
+        const appName = "bafia-official-push";
+        const existingApp = firebaseAppModule.getApps().find(
+          (app) => app.name === appName
+        );
+        const firebaseApp = existingApp ?? firebaseAppModule.initializeApp(
+          firebaseConfig,
+          appName
+        );
+        const messaging = firebaseMessagingModule.getMessaging(
+          firebaseApp
+        );
+        const registration = await navigator.serviceWorker.ready;
+        const cloudMessagingToken = String(
+          await firebaseMessagingModule.getToken(
+            messaging,
+            {
+              serviceWorkerRegistration: registration
+            }
+          ) ?? ""
+        ).trim();
+        if (!cloudMessagingToken) {
+          this.reportOfficialCloudMessagingProbe(
+            "Firebase \u043D\u0435 \u0432\u044B\u0434\u0430\u043B Web FCM token. \u0422\u0435\u043A\u0443\u0449\u0438\u0435 \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F \u043D\u0435 \u0441\u043B\u043E\u043C\u0430\u043D\u044B; \u043F\u0440\u043E\u0441\u0442\u043E \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 push-\u043F\u0443\u0442\u044C \u043F\u043E\u043A\u0430 \u043D\u0435 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u043B\u0441\u044F."
+          );
+          return;
+        }
+        const savedToken = localStorage.getItem(
+          "bafia.officialCloudMessagingToken"
+        );
+        const savedForUser = localStorage.getItem(
+          "bafia.officialCloudMessagingTokenUser"
+        );
+        if (savedToken === cloudMessagingToken && savedForUser === String(
+          App_default.user.objectId ?? ""
+        )) {
+          return;
+        }
+        const responsePromise = this.awaitPacket(
+          "cmts",
+          8e3
+        );
+        this.send(
+          "ncmt",
+          {
+            [PacketDataKeys_default.TOKEN]: cloudMessagingToken
+          }
+        );
+        await responsePromise;
+        localStorage.setItem(
+          "bafia.officialCloudMessagingToken",
+          cloudMessagingToken
+        );
+        localStorage.setItem(
+          "bafia.officialCloudMessagingTokenUser",
+          String(
+            App_default.user.objectId ?? ""
+          )
+        );
+        this.reportOfficialCloudMessagingProbe(
+          "\u041E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 \u0441\u0435\u0440\u0432\u0435\u0440 \u043F\u0440\u0438\u043D\u044F\u043B Web FCM token \u0438 \u043E\u0442\u0432\u0435\u0442\u0438\u043B cmts. \u0422\u0435\u043F\u0435\u0440\u044C \u043F\u043E\u043B\u043D\u043E\u0441\u0442\u044C\u044E \u0437\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u0443\u0439 iPhone \u0438 \u043E\u0442\u043F\u0440\u0430\u0432\u044C \u044D\u0442\u043E\u043C\u0443 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0443 \u043B\u0438\u0447\u043D\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u0441 \u0434\u0440\u0443\u0433\u043E\u0433\u043E \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430."
+        );
+      } catch (error2) {
+        console.error(
+          "Official FCM Web probe failed",
+          error2
+        );
+        const message = error2 instanceof Error ? error2.message : String(error2);
+        this.reportOfficialCloudMessagingProbe(
+          `\u041E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0439 FCM-\u043F\u0443\u0442\u044C \u043D\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043B\u0441\u044F:
+${message}
+
+\u041E\u0431\u044B\u0447\u043D\u044B\u0435 \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u044F \u0411\u0430\u0444\u0438\u0438 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0430\u044E\u0442 \u0440\u0430\u0431\u043E\u0442\u0430\u0442\u044C. \u041F\u043E \u044D\u0442\u043E\u0439 \u043E\u0448\u0438\u0431\u043A\u0435 \u0440\u0435\u0448\u0438\u043C, \u043C\u043E\u0436\u043D\u043E \u043B\u0438 \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u044C \u0440\u043E\u0434\u043D\u043E\u0439 Firebase \u0438\u043B\u0438 \u043D\u0443\u0436\u0435\u043D Web Push bridge.`
+        );
+      }
+    }
     async #init() {
       this.call("connect");
       this.logger.info(`Connected to server`);
@@ -36718,6 +36839,14 @@ ${format_default(tsr, "genitive")}`, { height: 250 });
           }
         }
       });
+      if (App_default.config.auth) {
+        window.setTimeout(
+          () => {
+            void this.tryRegisterOfficialCloudMessagingToken();
+          },
+          1500
+        );
+      }
     }
     send(type, data2) {
       let d;

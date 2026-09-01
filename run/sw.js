@@ -1,4 +1,4 @@
-self.addEventListener('install', (event) => {
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
@@ -6,19 +6,23 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async() => {
       /*
-        Удаляем старые bafia-кеши от предыдущих версий SW.
-        Дальше этот service worker вообще не вмешивается
-        в загрузку игры, аватарок и внешних ресурсов.
+        Remove old Bafia caches left by the earlier fetch-intercepting workers.
+        This worker intentionally does NOT handle fetch events.
       */
-      const keys = await caches.keys();
+      const keys =
+        await caches.keys();
 
       await Promise.all(
         keys
-          .filter((key) =>
-            key.startsWith('bafia-')
+          .filter(
+            (key) =>
+              key.startsWith(
+                'bafia-'
+              )
           )
-          .map((key) =>
-            caches.delete(key)
+          .map(
+            (key) =>
+              caches.delete(key)
           )
       );
 
@@ -28,15 +32,127 @@ self.addEventListener('activate', (event) => {
 });
 
 /*
-  Никакого fetch handler здесь специально нет.
-
-  Браузер сам загружает:
-  - GitHub Pages файлы
-  - dottap.com аватарки
-  - любые другие внешние ресурсы
-
-  Service Worker нужен нам только для уведомлений.
+  IMPORTANT:
+  There is deliberately NO fetch event handler here.
+  Network requests / avatars stay completely outside the service worker.
 */
+
+/*
+  Stage 2: receive a real Web Push/FCM push while the page itself is asleep.
+
+  The official Android client receives a data payload containing keys such as:
+    title
+    body
+    previousBody
+    summaryText
+    deeplinkUri
+    notificationChannel
+    notificationGroup
+    notificationId
+    notificationGroupSummaryId
+
+  Keep this parser tolerant because FCM Web may wrap those keys inside `data`.
+*/
+self.addEventListener(
+  'push',
+  (event) => {
+    event.waitUntil(
+      (async() => {
+        let payload = {};
+
+        try {
+          payload =
+            event.data
+              ? event.data.json()
+              : {};
+        } catch {
+          try {
+            payload = {
+              body:
+                event.data
+                  ? event.data.text()
+                  : ''
+            };
+          } catch {
+            payload = {};
+          }
+        }
+
+        const data =
+          (
+            payload &&
+            typeof payload ===
+              'object' &&
+            payload.data &&
+            typeof payload.data ===
+              'object'
+          )
+            ? payload.data
+            : payload;
+
+        const notification =
+          (
+            payload &&
+            typeof payload ===
+              'object' &&
+            payload.notification &&
+            typeof payload.notification ===
+              'object'
+          )
+            ? payload.notification
+            : {};
+
+        const title =
+          String(
+            data?.title ??
+            notification?.title ??
+            'Новое личное сообщение'
+          );
+
+        const body =
+          String(
+            data?.body ??
+            notification?.body ??
+            'Вам написали в Бафии'
+          );
+
+        const icon =
+          './splash_screens/icon.png';
+
+        const deeplinkUri =
+          data?.deeplinkUri ??
+          notification?.click_action ??
+          '';
+
+        const notificationId =
+          data?.notificationId ??
+          '';
+
+        await self.registration.showNotification(
+          title,
+          {
+            body,
+            icon,
+            tag:
+              notificationId
+                ? `bafia-official-${notificationId}`
+                : 'bafia-official-private-message',
+            data: {
+              kind:
+                'bafia-official-push',
+              deeplinkUri:
+                deeplinkUri
+                  ? String(deeplinkUri)
+                  : undefined,
+              raw:
+                data
+            }
+          }
+        );
+      })()
+    );
+  }
+);
 
 self.addEventListener(
   'notificationclick',
@@ -59,8 +175,10 @@ self.addEventListener(
             await client.focus();
 
             client.postMessage({
-              type: 'bafia-notification-click',
-              data: notificationData
+              type:
+                'bafia-notification-click',
+              data:
+                notificationData
             });
 
             return;
@@ -68,7 +186,9 @@ self.addEventListener(
         }
 
         if(self.clients.openWindow) {
-          await self.clients.openWindow('./');
+          await self.clients.openWindow(
+            './'
+          );
         }
       })()
     );
