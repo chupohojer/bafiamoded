@@ -1,4 +1,4 @@
-const CACHE_NAME = 'bafia-v3-autoupdate';
+const CACHE_NAME = 'bafia-v4-autoupdate';
 
 const ASSETS = [
   './manifest.json',
@@ -30,6 +30,15 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if(event.request.method !== 'GET')
+    return;
+
+  const requestUrl = new URL(event.request.url);
+
+  /*
+    Внешние ресурсы — аватарки, CDN и т.п. —
+    вообще не пропускаем через Service Worker.
+  */
+  if(requestUrl.origin !== self.location.origin)
     return;
 
   event.respondWith(
