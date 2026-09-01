@@ -18542,6 +18542,7 @@
         return;
       activeRequests++;
       const img = new Image();
+      img.referrerPolicy = "no-referrer";
       let finished = false;
       const finish = (result) => {
         if (finished) return;
@@ -18695,6 +18696,7 @@
   function loadImageDirect(url, timeoutMs = 5e3) {
     return new Promise((resolve) => {
       const img = new Image();
+      img.referrerPolicy = "no-referrer";
       let finished = false;
       const finish = (result) => {
         if (finished) return;
