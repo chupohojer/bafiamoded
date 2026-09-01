@@ -1302,6 +1302,69 @@ export default class Server extends Events<ServerEvents> {
     return true;
   }
 
+  private syncPushNotificationWorkerState() {
+    if(
+      !App.privateMessageNotificationsEnabled ||
+      !('serviceWorker' in navigator) ||
+      !App.user?.objectId ||
+      !App.user?.token
+    ) {
+      return;
+    }
+
+    const serverUrl =
+      String(
+        localStorage.ip ||
+        App.config.uriServer ||
+        ''
+      ).trim();
+
+    if(!serverUrl)
+      return;
+
+    const state = {
+      serverUrl,
+      userObjectId:
+        String(
+          App.user.objectId
+        ),
+      token:
+        String(
+          App.user.token
+        ),
+      playerObjectId:
+        String(
+          App.user.playerObjectId ??
+          ''
+        )
+    };
+
+    /*
+      The service worker cannot read localStorage while the iPhone is locked.
+      Give it the minimum session state needed to make ONE read-only private
+      chat request after an official push wakes it.
+    */
+    void navigator.serviceWorker.ready
+      .then(registration => {
+        const worker =
+          registration.active ??
+          navigator.serviceWorker.controller;
+
+        worker?.postMessage({
+          type:
+            'bafia-push-session-state',
+          data:
+            state
+        });
+      })
+      .catch(error => {
+        console.warn(
+          'Could not sync push session state',
+          error
+        );
+      });
+  }
+
   private reportOfficialCloudMessagingProbe(
     message: string
   ) {
@@ -1500,6 +1563,8 @@ export default class Server extends Events<ServerEvents> {
         )
       );
 
+      this.syncPushNotificationWorkerState();
+
       if(!wasAlreadySaved) {
         this.reportOfficialCloudMessagingProbe(
           'Официальный сервер принял Web FCM token и ответил cmts. Теперь полностью заблокируй iPhone и отправь этому аккаунту личное сообщение с другого аккаунта.'
@@ -1528,6 +1593,7 @@ export default class Server extends Events<ServerEvents> {
 
     if(App.config.auth){
       await this.auth.auth();
+      this.syncPushNotificationWorkerState();
     } else {
       App.screen = new Authorization();
     }
