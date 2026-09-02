@@ -37080,7 +37080,7 @@ ${message}
           } else {
             App_default2.screen = new Authorization();
           }
-          this.startPrivateMessageUnreadPolling();
+          this.stopPrivateMessageUnreadPolling();
           this.on("message", async (data2) => {
             this.lastPacket = null;
             this.lastPacket = data2;

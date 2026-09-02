@@ -1649,7 +1649,18 @@ export default class Server extends Events<ServerEvents> {
       App.screen = new Authorization();
     }
 
-    this.startPrivateMessageUnreadPolling();
+    /*
+      IMPORTANT:
+      Do NOT globally poll ADD_CLIENT_TO_FRIENDSHIP_LIST (acfl) here.
+
+      acfl is a subscription command used by the Friends screen. Sending it
+      every 5 seconds while Room is active can switch/replace the server-side
+      live subscription and the room then stops receiving real-time updates.
+
+      Official FCM push is now the background notification source, so this
+      legacy unread-count polling is no longer needed.
+    */
+    this.stopPrivateMessageUnreadPolling();
 
     this.on('message', async data => {
       this.lastPacket = null;
