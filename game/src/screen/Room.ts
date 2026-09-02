@@ -3336,11 +3336,10 @@ export default class Room extends Screen {
 
   private async openInviteFriends(){
     if(
-      this.isHistory ||
-      this.status != 0
-    ) {
-      return;
-    }
+  !this.shouldShowInviteFriendsButton()
+) {
+  return;
+}
 
     this.inviteFriendsOverlay?.remove();
 
@@ -4183,6 +4182,33 @@ export default class Room extends Screen {
       normalizedPlayers.length
     );
 
+    /*
+      Preserve already loaded avatar <img> nodes across waiting-room redraws.
+
+      USERS / ADD_PLAYER / REMOVE_PLAYER can rebuild the registration roster.
+      Recreating every <img> made Safari drop the visible avatar and start the
+      same remote image load again. Keep the existing node keyed by the same
+      player identity that Resources.ts uses for avatar synchronization.
+    */
+    const preservedWaitingAvatars =
+      new Map<string, HTMLImageElement>();
+
+    this.gamePlayersListElem
+      .querySelectorAll<HTMLImageElement>(
+        'img[data-bafia-avatar-id]'
+      )
+      .forEach(img => {
+        const identity =
+          img.dataset.bafiaAvatarId;
+
+        if(identity) {
+          preservedWaitingAvatars.set(
+            identity,
+            img
+          );
+        }
+      });
+
     this.gamePlayersListElem.innerHTML = '';
     this.gamePlayersListElem.style.display = 'grid';
     this.gamePlayersListElem.style.gridTemplateColumns =
@@ -4246,8 +4272,81 @@ export default class Room extends Screen {
       div.style.borderRadius = '10px';
       div.style.overflow = 'visible';
 
-      const avatar = document.createElement('img');
-      getAvatarImg(playerUser).then(e => avatar.src = e);
+      const avatarIdentity =
+        String(
+          playerObjectId ??
+          uo ??
+          ''
+        );
+
+      const avatarPhoto =
+        String(
+          playerUser?.[PacketDataKeys.PHOTO] ??
+          playerUser?.photo ??
+          ''
+        ).trim();
+
+      const preservedAvatar =
+        avatarIdentity
+          ? preservedWaitingAvatars.get(
+              avatarIdentity
+            )
+          : undefined;
+
+      const avatar =
+        preservedAvatar ??
+        document.createElement('img');
+
+      const canReuseLoadedAvatar =
+        !!preservedAvatar &&
+        preservedAvatar.dataset.bafiaAvatarPhoto ===
+          avatarPhoto &&
+        !!preservedAvatar.getAttribute('src');
+
+      if(avatarIdentity) {
+        avatar.dataset.bafiaAvatarId =
+          avatarIdentity;
+      }
+
+      avatar.dataset.bafiaAvatarPhoto =
+        avatarPhoto;
+
+      /*
+        Waiting-room avatars are visible immediately, so use the existing
+        foreground queue from Resources.ts. If this exact avatar node already
+        has the same loaded photo, do not assign src again — that is the part
+        that prevents the visible reload flash when another player joins.
+      */
+      if(!canReuseLoadedAvatar) {
+        const requestedIdentity =
+          avatarIdentity;
+
+        const requestedPhoto =
+          avatarPhoto;
+
+        getAvatarImg(
+          playerUser,
+          { foreground: true }
+        ).then(src => {
+          if(
+            !src ||
+            avatar.dataset.bafiaAvatarId !==
+              requestedIdentity ||
+            avatar.dataset.bafiaAvatarPhoto !==
+              requestedPhoto
+          ) {
+            return;
+          }
+
+          if(
+            avatar.getAttribute('src') !==
+              src
+          ) {
+            avatar.src = src;
+          }
+        });
+      }
+
       avatar.style.borderRadius = '100%';
       avatar.width = avatar.height =
         isMobile() ? 36 : 38;

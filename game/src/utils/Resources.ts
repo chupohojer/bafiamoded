@@ -30,10 +30,52 @@ let activeRequests = 0;
 const foregroundImageQueue: QueuedImageRequest[] = [];
 const imageQueue: QueuedImageRequest[] = [];
 
-const MAX_CONCURRENT_REQUESTS = 5;
-const IMAGE_TIMEOUT_MS = 5000;
+/*
+  Avatar CDN tuning.
+
+  Five simultaneous requests made larger lists arrive in too many waves,
+  especially when one dottap.com candidate was slow. Eight is still a modest
+  cap for mobile Safari, but lets visible room/friends/rating avatars fill in
+  noticeably faster.
+
+  A dead/slow candidate now gives the next known avatar URL a chance after
+  3 seconds instead of holding one queue slot for the full 5 seconds.
+  Background retries remain unchanged, so a temporarily slow real avatar can
+  still recover later without becoming a permanent placeholder.
+*/
+const MAX_CONCURRENT_REQUESTS = 8;
+/*
+  Lists and explicit profile/dashboard requests need different timeouts.
+
+  In a large list, one broken/slow avatar must release its queue slot quickly
+  so later players can load. An 8 second global timeout can let a handful of
+  bad URLs occupy every shared slot and make the whole leaderboard feel slow.
+
+  A clicked profile or the Dashboard is different: it bypasses the list queue,
+  so it can afford to wait longer for a slow but valid dottap.com image.
+*/
+const IMAGE_TIMEOUT_MS = 3000;
+const PRIORITY_IMAGE_TIMEOUT_MS = 8000;
+
+/*
+  Initial on-screen avatars must not be serialized behind our own 8-slot
+  JavaScript queue.
+
+  Safari already has its own HTTP/2 connection scheduler and cache. Let every
+  initially requested avatar enter the browser network stack immediately, while
+  keeping the old bounded queue only for background retries.
+
+  This removes the previous "compromise":
+  - a slow/broken avatar cannot occupy one of our slots and delay later users;
+  - a slow but valid avatar is allowed enough time to finish;
+  - retries still stay bounded and cannot flood the browser.
+*/
+const VISIBLE_IMAGE_TIMEOUT_MS = 12000;
 
 const pendingUrlPromises =
+  new Map<string, Promise<string | null>>();
+
+const pendingVisibleUrlPromises =
   new Map<string, Promise<string | null>>();
 
 const pendingAvatarPromises =
@@ -396,6 +438,170 @@ function loadImageDirect(
   });
 }
 
+/*
+  Shared immediate loader for avatars that are requested by a real screen.
+
+  The exact same URL is still deduplicated, so Dashboard/Profile/Room/Rating
+  cannot accidentally start duplicate preloads for one URL at the same time.
+*/
+function loadVisibleImage(
+  url: string,
+  timeoutMs: number
+): Promise<string | null> {
+  const existing =
+    pendingVisibleUrlPromises.get(url);
+
+  if(existing)
+    return existing;
+
+  const promise =
+    loadImageDirect(
+      url,
+      timeoutMs
+    ).finally(() => {
+      pendingVisibleUrlPromises.delete(
+        url
+      );
+    });
+
+  pendingVisibleUrlPromises.set(
+    url,
+    promise
+  );
+
+  return promise;
+}
+
+/*
+  Custom uploaded avatars have two already-known valid lookup forms:
+    1) /profile_photo/<photo>
+    2) /profile_photo/<playerObjectId>?v=<photo>
+
+  Waiting for the first route to time out before trying the second makes a
+  single slow CDN/backend path add seconds of visible placeholder time.
+
+  Use a small "hedge": start the normal photo URL first, and only if it has not
+  finished quickly, start the player-id URL as well. The first successful one
+  wins. Fast primary requests therefore stay one-request-only; slow ones no
+  longer block the useful fallback for several seconds.
+*/
+const AVATAR_HEDGE_DELAY_MS = 350;
+
+function loadAvatarUrl(
+  url: string,
+  options: AvatarLoadOptions
+) {
+  /*
+    Every call reaching this function belongs to a currently requested screen
+    avatar. Start it immediately and let Safari schedule/cache the HTTP work.
+
+    scheduleAvatarRetry() intentionally does NOT use this function: retries
+    continue through loadImageWithQueue(), so failed avatars cannot create an
+    uncontrolled background request storm.
+  */
+  return loadVisibleImage(
+    url,
+    options.priority
+      ? PRIORITY_IMAGE_TIMEOUT_MS
+      : VISIBLE_IMAGE_TIMEOUT_MS
+  );
+}
+
+function loadHedgedAvatarPair(
+  primaryUrl: string,
+  secondaryUrl: string,
+  options: AvatarLoadOptions
+): Promise<string | null> {
+  return new Promise(resolve => {
+    let finished = false;
+    let primaryFinished = false;
+    let secondaryStarted = false;
+    let secondaryFinished = false;
+
+    const maybeFinishEmpty = () => {
+      if(
+        !finished &&
+        primaryFinished &&
+        secondaryStarted &&
+        secondaryFinished
+      ) {
+        finished = true;
+        resolve(null);
+      }
+    };
+
+    const accept = (
+      result: string | null,
+      source: "primary" | "secondary"
+    ) => {
+      if(source === "primary") {
+        primaryFinished = true;
+      } else {
+        secondaryFinished = true;
+      }
+
+      if(finished)
+        return;
+
+      if(result) {
+        finished = true;
+        resolve(result);
+        return;
+      }
+
+      /*
+        If the primary failed outright, do not wait for the hedge timer.
+        Start the known player-id form immediately.
+      */
+      if(
+        source === "primary" &&
+        !secondaryStarted
+      ) {
+        startSecondary();
+        return;
+      }
+
+      maybeFinishEmpty();
+    };
+
+    const startSecondary = () => {
+      if(
+        finished ||
+        secondaryStarted
+      ) {
+        return;
+      }
+
+      secondaryStarted = true;
+
+      void loadAvatarUrl(
+        secondaryUrl,
+        options
+      ).then(result =>
+        accept(
+          result,
+          "secondary"
+        )
+      );
+    };
+
+    void loadAvatarUrl(
+      primaryUrl,
+      options
+    ).then(result =>
+      accept(
+        result,
+        "primary"
+      )
+    );
+
+    window.setTimeout(
+      startSecondary,
+      AVATAR_HEDGE_DELAY_MS
+    );
+  });
+}
+
 export async function getAvatarImg(
   user?: any,
   options: AvatarLoadOptions = {}
@@ -565,48 +771,102 @@ export async function getAvatarImg(
         }
       }
 
-      for(const url of candidates) {
-        const loaded =
-          options.priority
-            ? await loadImageDirect(
-                url,
-                5000
-              )
-            : await loadImageWithQueue(
-                url,
-                options.foreground === true
-              );
+      const acceptLoadedAvatar = (
+        loaded: string | null
+      ) => {
+        if(!loaded)
+          return null;
 
-        if(loaded) {
-          App.resources[cacheKey] =
-            loaded;
+        App.resources[cacheKey] =
+          loaded;
 
-          const retryTimer =
-            avatarRetryTimers.get(
-              cacheKey
-            );
-
-          if(retryTimer !== undefined) {
-            window.clearTimeout(
-              retryTimer
-            );
-
-            avatarRetryTimers.delete(
-              cacheKey
-            );
-          }
-
-          avatarRetryAttempts.delete(
+        const retryTimer =
+          avatarRetryTimers.get(
             cacheKey
           );
 
-          syncAvatarElements(
-            identity,
+        if(retryTimer !== undefined) {
+          window.clearTimeout(
+            retryTimer
+          );
+
+          avatarRetryTimers.delete(
+            cacheKey
+          );
+        }
+
+        avatarRetryAttempts.delete(
+          cacheKey
+        );
+
+        syncAvatarElements(
+          identity,
+          loaded
+        );
+
+        return loaded;
+      };
+
+      /*
+        Only hedge ordinary uploaded-photo ids.
+
+        Default m1/w1-style avatars already have a dedicated fast endpoint, while
+        absolute/data URLs are already exact and need no alternate request.
+      */
+      const canHedgeCustomAvatar =
+        Boolean(
+          photo &&
+          !isDefaultPhotoId(photo) &&
+          !photo.startsWith("http://") &&
+          !photo.startsWith("https://") &&
+          !photo.startsWith("data:") &&
+          playerObjectId &&
+          candidates.length >= 2
+        );
+
+      let nextCandidateIndex = 0;
+
+      if(canHedgeCustomAvatar) {
+        const hedgedLoaded =
+          await loadHedgedAvatarPair(
+            candidates[0],
+            candidates[1],
+            options
+          );
+
+        const accepted =
+          acceptLoadedAvatar(
+            hedgedLoaded
+          );
+
+        if(accepted)
+          return accepted;
+
+        /*
+          The first two known forms both failed. Continue only with the older
+          OBJECT_ID fallback, if this packet actually supplied one.
+        */
+        nextCandidateIndex = 2;
+      }
+
+      for(
+        let i = nextCandidateIndex;
+        i < candidates.length;
+        i++
+      ) {
+        const loaded =
+          await loadAvatarUrl(
+            candidates[i],
+            options
+          );
+
+        const accepted =
+          acceptLoadedAvatar(
             loaded
           );
 
-          return loaded;
-        }
+        if(accepted)
+          return accepted;
 
         /*
           Another request for the same player may have finished while
@@ -638,13 +898,20 @@ export async function getAvatarImg(
         When it eventually succeeds, syncAvatarElements() replaces the
         placeholder in-place — no profile click / refresh is required.
       */
-      if(!options.priority) {
-        scheduleAvatarRetry(
-          identity,
-          cacheKey,
-          candidates
-        );
-      }
+      /*
+        Priority requests (Dashboard / explicitly opened ProfileInfo) must also
+        recover from a temporary dottap.com failure. Previously they tried each
+        URL once and then stayed on the local placeholder until the screen/photo
+        key changed, while ordinary list avatars kept retrying in background.
+
+        Use the same shared retry scheduler for both paths. It remains
+        deduplicated by cacheKey and still goes through the bounded image queue.
+      */
+      scheduleAvatarRetry(
+        identity,
+        cacheKey,
+        candidates
+      );
 
       const fallback =
         await getDefaultAvatar();

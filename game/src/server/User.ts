@@ -42,9 +42,41 @@ export default class User {
 
   update(user: any){
     // this.objectId = user[PacketDataKeys.OBJECT_ID];
-    this.playerObjectId = user[PacketDataKeys.PLAYER_OBJECT_ID];
+
+    /*
+      DASHBOARD/USER packets are not guaranteed to contain every identity field.
+      Do not erase an already-known public player id when a partial packet omits
+      it, because avatar loading prefers PLAYER_OBJECT_ID.
+
+      PHOTO is similar: preserve the previous value only when the field is
+      absent. An explicit empty string is still accepted so removing a photo
+      continues to work.
+    */
+    const nextPlayerObjectId =
+      user[PacketDataKeys.PLAYER_OBJECT_ID];
+
+    if(
+      nextPlayerObjectId !== undefined &&
+      nextPlayerObjectId !== null &&
+      String(nextPlayerObjectId).trim() !== ""
+    ) {
+      this.playerObjectId =
+        nextPlayerObjectId;
+    }
+
     this.username = user[PacketDataKeys.USERNAME];
-    this.photo = user[PacketDataKeys.PHOTO];
+
+    const nextPhoto =
+      user[PacketDataKeys.PHOTO];
+
+    if(
+      nextPhoto !== undefined &&
+      nextPhoto !== null
+    ) {
+      this.photo =
+        nextPhoto;
+    }
+
     this.status = user[PacketDataKeys.STATUS];
     // this.token = user[PacketDataKeys.TOKEN];
     this.experience = user[PacketDataKeys.EXPERIENCE];

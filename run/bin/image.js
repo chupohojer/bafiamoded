@@ -1946,6 +1946,91 @@
       img.src = url;
     });
   }
+  function loadVisibleImage(url, timeoutMs) {
+    const existing = pendingVisibleUrlPromises.get(url);
+    if (existing)
+      return existing;
+    const promise = loadImageDirect(
+      url,
+      timeoutMs
+    ).finally(() => {
+      pendingVisibleUrlPromises.delete(
+        url
+      );
+    });
+    pendingVisibleUrlPromises.set(
+      url,
+      promise
+    );
+    return promise;
+  }
+  function loadAvatarUrl(url, options) {
+    return loadVisibleImage(
+      url,
+      options.priority ? PRIORITY_IMAGE_TIMEOUT_MS : VISIBLE_IMAGE_TIMEOUT_MS
+    );
+  }
+  function loadHedgedAvatarPair(primaryUrl, secondaryUrl, options) {
+    return new Promise((resolve) => {
+      let finished = false;
+      let primaryFinished = false;
+      let secondaryStarted = false;
+      let secondaryFinished = false;
+      const maybeFinishEmpty = () => {
+        if (!finished && primaryFinished && secondaryStarted && secondaryFinished) {
+          finished = true;
+          resolve(null);
+        }
+      };
+      const accept = (result, source) => {
+        if (source === "primary") {
+          primaryFinished = true;
+        } else {
+          secondaryFinished = true;
+        }
+        if (finished)
+          return;
+        if (result) {
+          finished = true;
+          resolve(result);
+          return;
+        }
+        if (source === "primary" && !secondaryStarted) {
+          startSecondary();
+          return;
+        }
+        maybeFinishEmpty();
+      };
+      const startSecondary = () => {
+        if (finished || secondaryStarted) {
+          return;
+        }
+        secondaryStarted = true;
+        void loadAvatarUrl(
+          secondaryUrl,
+          options
+        ).then(
+          (result) => accept(
+            result,
+            "secondary"
+          )
+        );
+      };
+      void loadAvatarUrl(
+        primaryUrl,
+        options
+      ).then(
+        (result) => accept(
+          result,
+          "primary"
+        )
+      );
+      window.setTimeout(
+        startSecondary,
+        AVATAR_HEDGE_DELAY_MS
+      );
+    });
+  }
   async function getAvatarImg(user, options = {}) {
     if (user == "\u0411\u0430\u0440\u043C\u0435\u043D")
       return App_default.resources["barmanChat"];
@@ -2016,36 +2101,57 @@
           );
         }
       }
-      for (const url of candidates) {
-        const loaded = options.priority ? await loadImageDirect(
-          url,
-          5e3
-        ) : await loadImageWithQueue(
-          url,
-          options.foreground === true
+      const acceptLoadedAvatar = (loaded) => {
+        if (!loaded)
+          return null;
+        App_default.resources[cacheKey] = loaded;
+        const retryTimer = avatarRetryTimers.get(
+          cacheKey
         );
-        if (loaded) {
-          App_default.resources[cacheKey] = loaded;
-          const retryTimer = avatarRetryTimers.get(
+        if (retryTimer !== void 0) {
+          window.clearTimeout(
+            retryTimer
+          );
+          avatarRetryTimers.delete(
             cacheKey
           );
-          if (retryTimer !== void 0) {
-            window.clearTimeout(
-              retryTimer
-            );
-            avatarRetryTimers.delete(
-              cacheKey
-            );
-          }
-          avatarRetryAttempts.delete(
-            cacheKey
-          );
-          syncAvatarElements(
-            identity,
-            loaded
-          );
-          return loaded;
         }
+        avatarRetryAttempts.delete(
+          cacheKey
+        );
+        syncAvatarElements(
+          identity,
+          loaded
+        );
+        return loaded;
+      };
+      const canHedgeCustomAvatar = Boolean(
+        photo && !isDefaultPhotoId(photo) && !photo.startsWith("http://") && !photo.startsWith("https://") && !photo.startsWith("data:") && playerObjectId && candidates.length >= 2
+      );
+      let nextCandidateIndex = 0;
+      if (canHedgeCustomAvatar) {
+        const hedgedLoaded = await loadHedgedAvatarPair(
+          candidates[0],
+          candidates[1],
+          options
+        );
+        const accepted = acceptLoadedAvatar(
+          hedgedLoaded
+        );
+        if (accepted)
+          return accepted;
+        nextCandidateIndex = 2;
+      }
+      for (let i = nextCandidateIndex; i < candidates.length; i++) {
+        const loaded = await loadAvatarUrl(
+          candidates[i],
+          options
+        );
+        const accepted = acceptLoadedAvatar(
+          loaded
+        );
+        if (accepted)
+          return accepted;
         const siblingLoaded = App_default.resources[cacheKey];
         if (siblingLoaded && !String(siblingLoaded).startsWith("data:")) {
           syncAvatarElements(
@@ -2055,13 +2161,11 @@
           return siblingLoaded;
         }
       }
-      if (!options.priority) {
-        scheduleAvatarRetry(
-          identity,
-          cacheKey,
-          candidates
-        );
-      }
+      scheduleAvatarRetry(
+        identity,
+        cacheKey,
+        candidates
+      );
       const fallback = await getDefaultAvatar();
       const loadedMeanwhile = App_default.resources[cacheKey];
       if (loadedMeanwhile && !String(loadedMeanwhile).startsWith("data:")) {
@@ -2112,7 +2216,7 @@
     App_default.resources[`assets/textures/` + path] = await fs_default.loadImageAsDataURL(`${App_default.config.path}/assets/textures/${path}`);
     return App_default.resources[`assets/textures/` + path];
   }
-  var activeRequests, foregroundImageQueue, imageQueue, MAX_CONCURRENT_REQUESTS, IMAGE_TIMEOUT_MS, pendingUrlPromises, pendingAvatarPromises, avatarRetryTimers, avatarRetryAttempts, AVATAR_RETRY_DELAYS;
+  var activeRequests, foregroundImageQueue, imageQueue, MAX_CONCURRENT_REQUESTS, IMAGE_TIMEOUT_MS, PRIORITY_IMAGE_TIMEOUT_MS, VISIBLE_IMAGE_TIMEOUT_MS, pendingUrlPromises, pendingVisibleUrlPromises, pendingAvatarPromises, avatarRetryTimers, avatarRetryAttempts, AVATAR_RETRY_DELAYS, AVATAR_HEDGE_DELAY_MS;
   var init_Resources = __esm({
     "game/src/utils/Resources.ts"() {
       init_fs();
@@ -2121,13 +2225,17 @@
       activeRequests = 0;
       foregroundImageQueue = [];
       imageQueue = [];
-      MAX_CONCURRENT_REQUESTS = 5;
-      IMAGE_TIMEOUT_MS = 5e3;
+      MAX_CONCURRENT_REQUESTS = 8;
+      IMAGE_TIMEOUT_MS = 3e3;
+      PRIORITY_IMAGE_TIMEOUT_MS = 8e3;
+      VISIBLE_IMAGE_TIMEOUT_MS = 12e3;
       pendingUrlPromises = /* @__PURE__ */ new Map();
+      pendingVisibleUrlPromises = /* @__PURE__ */ new Map();
       pendingAvatarPromises = /* @__PURE__ */ new Map();
       avatarRetryTimers = /* @__PURE__ */ new Map();
       avatarRetryAttempts = /* @__PURE__ */ new Map();
       AVATAR_RETRY_DELAYS = [700, 1800, 4500, 1e4];
+      AVATAR_HEDGE_DELAY_MS = 350;
     }
   });
 
@@ -2362,9 +2470,15 @@
         goldCoins = 0;
         sliverCoins = 0;
         update(user) {
-          this.playerObjectId = user[PacketDataKeys_default.PLAYER_OBJECT_ID];
+          const nextPlayerObjectId = user[PacketDataKeys_default.PLAYER_OBJECT_ID];
+          if (nextPlayerObjectId !== void 0 && nextPlayerObjectId !== null && String(nextPlayerObjectId).trim() !== "") {
+            this.playerObjectId = nextPlayerObjectId;
+          }
           this.username = user[PacketDataKeys_default.USERNAME];
-          this.photo = user[PacketDataKeys_default.PHOTO];
+          const nextPhoto = user[PacketDataKeys_default.PHOTO];
+          if (nextPhoto !== void 0 && nextPhoto !== null) {
+            this.photo = nextPhoto;
+          }
           this.status = user[PacketDataKeys_default.STATUS];
           this.experience = user[PacketDataKeys_default.EXPERIENCE];
           this.nextLevelExperience = user[PacketDataKeys_default.NEXT_LEVEL_EXPERIENCE];
@@ -22996,7 +23110,7 @@
           });
         }
         async openInviteFriends() {
-          if (this.isHistory || this.status != 0) {
+          if (!this.shouldShowInviteFriendsButton()) {
             return;
           }
           this.inviteFriendsOverlay?.remove();
@@ -23485,6 +23599,18 @@
           this.updateRoomHeader(
             normalizedPlayers.length
           );
+          const preservedWaitingAvatars = /* @__PURE__ */ new Map();
+          this.gamePlayersListElem.querySelectorAll(
+            "img[data-bafia-avatar-id]"
+          ).forEach((img) => {
+            const identity = img.dataset.bafiaAvatarId;
+            if (identity) {
+              preservedWaitingAvatars.set(
+                identity,
+                img
+              );
+            }
+          });
           this.gamePlayersListElem.innerHTML = "";
           this.gamePlayersListElem.style.display = "grid";
           this.gamePlayersListElem.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
@@ -23516,8 +23642,36 @@
             div2.style.boxSizing = "border-box";
             div2.style.borderRadius = "10px";
             div2.style.overflow = "visible";
-            const avatar = document.createElement("img");
-            getAvatarImg(playerUser).then((e) => avatar.src = e);
+            const avatarIdentity = String(
+              playerObjectId ?? uo ?? ""
+            );
+            const avatarPhoto = String(
+              playerUser?.[PacketDataKeys_default.PHOTO] ?? playerUser?.photo ?? ""
+            ).trim();
+            const preservedAvatar = avatarIdentity ? preservedWaitingAvatars.get(
+              avatarIdentity
+            ) : void 0;
+            const avatar = preservedAvatar ?? document.createElement("img");
+            const canReuseLoadedAvatar = !!preservedAvatar && preservedAvatar.dataset.bafiaAvatarPhoto === avatarPhoto && !!preservedAvatar.getAttribute("src");
+            if (avatarIdentity) {
+              avatar.dataset.bafiaAvatarId = avatarIdentity;
+            }
+            avatar.dataset.bafiaAvatarPhoto = avatarPhoto;
+            if (!canReuseLoadedAvatar) {
+              const requestedIdentity = avatarIdentity;
+              const requestedPhoto = avatarPhoto;
+              getAvatarImg(
+                playerUser,
+                { foreground: true }
+              ).then((src) => {
+                if (!src || avatar.dataset.bafiaAvatarId !== requestedIdentity || avatar.dataset.bafiaAvatarPhoto !== requestedPhoto) {
+                  return;
+                }
+                if (avatar.getAttribute("src") !== src) {
+                  avatar.src = src;
+                }
+              });
+            }
             avatar.style.borderRadius = "100%";
             avatar.width = avatar.height = isMobile() ? 36 : 38;
             avatar.style.margin = "2px 6px 2px 1px";
