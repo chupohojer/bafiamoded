@@ -20510,7 +20510,7 @@
     wrapper.style.width = "fit-content";
     wrapper.style.maxWidth = "100%";
     wrapper.style.flexShrink = "0";
-    wrapper.style.overflow = "hidden";
+    wrapper.style.overflow = "visible";
     wrapper.style.boxSizing = "border-box";
     wrapper.style.borderRadius = options.borderRadius ?? "9px";
     wrapper.style.background = "transparent";
@@ -20530,7 +20530,7 @@
       const shadowColor = androidColorToCss(
         String(usernameShadow["1"])
       );
-      usernameElement.style.textShadow = `0 1px 4px ${shadowColor}`;
+      usernameElement.style.textShadow = `0 0 3px ${shadowColor}, 0 0 7px ${shadowColor}`;
     }
     if (usernameBackground?.["1"]) {
       wrapper.style.background = androidColorToCss(

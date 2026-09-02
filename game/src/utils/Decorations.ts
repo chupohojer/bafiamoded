@@ -165,7 +165,14 @@ export function renderUsernameDecorations(
   wrapper.style.width = "fit-content";
   wrapper.style.maxWidth = "100%";
   wrapper.style.flexShrink = "0";
-  wrapper.style.overflow = "hidden";
+  /*
+    Keep the nickname wrapper open so UsernameShadow can bloom outside the
+    text/pill bounds like in the Android client.
+
+    The Lottie layer below still has overflow="hidden" on its own element, so
+    username animations remain clipped to the rounded pill exactly as before.
+  */
+  wrapper.style.overflow = "visible";
   wrapper.style.boxSizing = "border-box";
   wrapper.style.borderRadius =
     options.borderRadius ?? "9px";
@@ -194,8 +201,17 @@ export function renderUsernameDecorations(
         String(usernameShadow["1"])
       );
 
+    /*
+      Android UsernameShadow is centered around the glyphs rather than shifted
+      downward. Zero X/Y offset lets the blur expand evenly in every direction.
+    */
+    /*
+      The original Android shadow is not only centered; visually it also has
+      a denser core plus a wider halo around the glyphs. Two centered CSS
+      shadows reproduce that better than one large blur.
+    */
     usernameElement.style.textShadow =
-      `0 1px 4px ${shadowColor}`;
+      `0 0 3px ${shadowColor}, 0 0 7px ${shadowColor}`;
   }
 
   if(usernameBackground?.["1"]) {
