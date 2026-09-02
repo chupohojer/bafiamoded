@@ -35004,8 +35004,19 @@ ${format_default(timeout, "genitive")}`,
       canvasWrap.style.minHeight = "min(78vw, 320px)";
       panel.appendChild(canvasWrap);
       const canvas = document.createElement("canvas");
-      canvas.width = cropSize;
-      canvas.height = cropSize;
+      const previewPixelRatio = Math.min(
+        3,
+        Math.max(
+          1,
+          window.devicePixelRatio || 1
+        )
+      );
+      canvas.width = Math.round(
+        cropSize * previewPixelRatio
+      );
+      canvas.height = Math.round(
+        cropSize * previewPixelRatio
+      );
       canvas.style.width = "min(78vw, 320px)";
       canvas.style.height = "min(78vw, 320px)";
       canvas.style.display = "block";
@@ -35020,6 +35031,16 @@ ${format_default(timeout, "genitive")}`,
         resolve(null);
         return;
       }
+      ctx.setTransform(
+        previewPixelRatio,
+        0,
+        0,
+        previewPixelRatio,
+        0,
+        0
+      );
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       const clampOffsets = () => {
         const scale2 = baseScale * zoom;
         const drawWidth = naturalWidth * scale2;
@@ -35283,48 +35304,82 @@ ${format_default(timeout, "genitive")}`,
       panel.onclick = (event) => event.stopPropagation();
       useBtn.onclick = () => {
         clampOffsets();
-        const outputSize = 1024;
-        const output = document.createElement("canvas");
-        output.width = outputSize;
-        output.height = outputSize;
-        const outputCtx = output.getContext("2d");
-        if (!outputCtx) {
-          finish(null);
-          return;
-        }
-        outputCtx.fillStyle = "#ffffff";
-        outputCtx.fillRect(
-          0,
-          0,
-          outputSize,
-          outputSize
-        );
         const rect = getDrawRect();
-        const outputScale = outputSize / cropSize;
-        outputCtx.drawImage(
-          img,
-          rect.x * outputScale,
-          rect.y * outputScale,
-          rect.width * outputScale,
-          rect.height * outputScale
+        const imageScale = rect.width / naturalWidth;
+        const nativeCropSize = cropSize / Math.max(
+          imageScale,
+          1e-6
         );
-        const qualities = [0.96, 0.94, 0.92, 0.9, 0.86];
-        let base64 = "";
-        for (const quality of qualities) {
+        const sourceX = Math.max(
+          0,
+          -rect.x / imageScale
+        );
+        const sourceY = Math.max(
+          0,
+          -rect.y / imageScale
+        );
+        const sourceSize = Math.min(
+          nativeCropSize,
+          naturalWidth - sourceX,
+          naturalHeight - sourceY
+        );
+        const encodeCrop = (outputSize, quality) => {
+          const output = document.createElement("canvas");
+          output.width = outputSize;
+          output.height = outputSize;
+          const outputCtx = output.getContext("2d");
+          if (!outputCtx) {
+            return "";
+          }
+          outputCtx.imageSmoothingEnabled = true;
+          outputCtx.imageSmoothingQuality = "high";
+          outputCtx.fillStyle = "#ffffff";
+          outputCtx.fillRect(
+            0,
+            0,
+            outputSize,
+            outputSize
+          );
+          outputCtx.drawImage(
+            img,
+            sourceX,
+            sourceY,
+            sourceSize,
+            sourceSize,
+            0,
+            0,
+            outputSize,
+            outputSize
+          );
           const dataUrl = output.toDataURL(
             "image/jpeg",
             quality
           );
-          base64 = dataUrl.split(",")[1] ?? "";
-          if (base64.length <= 85e4) {
-            break;
-          }
-        }
-        if (!base64) {
+          return dataUrl.split(",")[1] ?? "";
+        };
+        const hqOutputSize = Math.max(
+          1,
+          Math.min(
+            2048,
+            Math.round(sourceSize)
+          )
+        );
+        const hq = encodeCrop(
+          hqOutputSize,
+          0.98
+        );
+        const compatible = encodeCrop(
+          384,
+          0.9
+        );
+        if (!hq || !compatible) {
           finish(null);
           return;
         }
-        finish(base64);
+        finish({
+          hq,
+          compatible
+        });
       };
       render();
       document.body.appendChild(
@@ -36088,9 +36143,9 @@ ${format_default(timeout, "genitive")}`,
                   MessageBox_default("\u0414\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B \u0442\u043E\u043B\u044C\u043A\u043E PNG \u0438 JPG");
                   return;
                 }
-                let base64;
+                let uploadVariants;
                 try {
-                  base64 = await cropAvatarForUpload(
+                  uploadVariants = await cropAvatarForUpload(
                     file
                   );
                 } catch (e2) {
@@ -36100,67 +36155,53 @@ ${e2}`
                   );
                   return;
                 }
-                if (!base64) {
+                if (!uploadVariants) {
                   return;
                 }
                 const oldPhoto = String(
                   App_default.user.photo ?? ""
                 );
-                const responsePromise = App_default.server.awaitPacket(
-                  [
-                    PacketDataKeys_default.DASHBOARD,
-                    PacketDataKeys_default.UPLOAD_PHOTO,
-                    PacketDataKeys_default.WRONG_FILE_TYPE,
-                    PacketDataKeys_default.WRONG_FILE_SIZE,
-                    PacketDataKeys_default.USER_LEVEL_NOT_ENOUGH,
-                    PacketDataKeys_default.SIGN_IN_ERROR
-                  ],
-                  3e3
-                ).catch(() => null);
-                App_default.server.send(
+                const uploadPacketTypes = [
+                  PacketDataKeys_default.DASHBOARD,
                   PacketDataKeys_default.UPLOAD_PHOTO,
-                  {
-                    [PacketDataKeys_default.USER_OBJECT_ID]: App_default.user.objectId,
-                    [PacketDataKeys_default.TOKEN]: App_default.user.token,
-                    [PacketDataKeys_default.FILE]: base64
-                  }
-                );
-                const uploadResponse = await responsePromise;
-                if (uploadResponse) {
-                  const responseType = uploadResponse[PacketDataKeys_default.TYPE];
-                  if (responseType == PacketDataKeys_default.WRONG_FILE_TYPE) {
-                    MessageBox_default(
-                      "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0444\u043E\u0440\u043C\u0430\u0442 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u044F"
-                    );
-                    return;
-                  }
-                  if (responseType == PacketDataKeys_default.WRONG_FILE_SIZE) {
-                    MessageBox_default(
-                      "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0440\u0430\u0437\u043C\u0435\u0440 \u0444\u043E\u0442\u043E\u0433\u0440\u0430\u0444\u0438\u0438"
-                    );
-                    return;
-                  }
-                  if (responseType == PacketDataKeys_default.USER_LEVEL_NOT_ENOUGH) {
-                    MessageBox_default(
-                      "\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0434\u043B\u044F \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 \u0441\u0432\u043E\u0435\u0439 \u0430\u0432\u0430\u0442\u0430\u0440\u043A\u0438"
-                    );
-                    return;
-                  }
-                  if (responseType == PacketDataKeys_default.SIGN_IN_ERROR) {
-                    MessageBox_default(
-                      `\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u044E \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 (\u043A\u043E\u0434: ${uploadResponse[PacketDataKeys_default.ERROR] ?? "?"})`
-                    );
-                    return;
-                  }
-                }
-                let dashboardPacket = uploadResponse?.[PacketDataKeys_default.TYPE] == PacketDataKeys_default.DASHBOARD ? uploadResponse : null;
-                if (!dashboardPacket) {
-                  await new Promise(
-                    (resolve) => window.setTimeout(
-                      resolve,
-                      250
-                    )
+                  PacketDataKeys_default.WRONG_FILE_TYPE,
+                  PacketDataKeys_default.WRONG_FILE_SIZE,
+                  PacketDataKeys_default.USER_LEVEL_NOT_ENOUGH,
+                  PacketDataKeys_default.SIGN_IN_ERROR
+                ];
+                const sendPhotoPayload = async (payload, timeoutMs) => {
+                  const responsePromise = App_default.server.awaitPacket(
+                    uploadPacketTypes,
+                    timeoutMs
+                  ).catch(() => null);
+                  App_default.server.send(
+                    PacketDataKeys_default.UPLOAD_PHOTO,
+                    {
+                      [PacketDataKeys_default.USER_OBJECT_ID]: App_default.user.objectId,
+                      [PacketDataKeys_default.TOKEN]: App_default.user.token,
+                      [PacketDataKeys_default.FILE]: payload
+                    }
                   );
+                  return await responsePromise;
+                };
+                const getDashboardPhoto = (packet) => packet?.[PacketDataKeys_default.DASHBOARD]?.[PacketDataKeys_default.DASHBOARD_USER]?.[PacketDataKeys_default.PHOTO];
+                const hasChangedPhoto = (packet) => {
+                  const value2 = getDashboardPhoto(packet);
+                  return value2 != null && String(value2) !== oldPhoto;
+                };
+                const requestFreshDashboard = async (delayMs, timeoutMs = 3e3) => {
+                  if (delayMs > 0) {
+                    await new Promise(
+                      (resolve) => window.setTimeout(
+                        resolve,
+                        delayMs
+                      )
+                    );
+                  }
+                  const dashboardPromise = App_default.server.awaitPacket(
+                    PacketDataKeys_default.DASHBOARD,
+                    timeoutMs
+                  ).catch(() => null);
                   App_default.server.send(
                     PacketDataKeys_default.ADD_CLIENT_TO_DASHBOARD,
                     {
@@ -36168,10 +36209,113 @@ ${e2}`
                       [PacketDataKeys_default.TOKEN]: App_default.user.token
                     }
                   );
-                  dashboardPacket = await App_default.server.awaitPacket(
-                    PacketDataKeys_default.DASHBOARD,
-                    2500
-                  ).catch(() => null);
+                  return await dashboardPromise;
+                };
+                const showNonRetryableError = (response) => {
+                  const responseType = response?.[PacketDataKeys_default.TYPE];
+                  if (responseType == PacketDataKeys_default.USER_LEVEL_NOT_ENOUGH) {
+                    MessageBox_default(
+                      "\u041D\u0435\u0434\u043E\u0441\u0442\u0430\u0442\u043E\u0447\u043D\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u0434\u043B\u044F \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 \u0441\u0432\u043E\u0435\u0439 \u0430\u0432\u0430\u0442\u0430\u0440\u043A\u0438"
+                    );
+                    return true;
+                  }
+                  if (responseType == PacketDataKeys_default.SIGN_IN_ERROR) {
+                    MessageBox_default(
+                      `\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u044E \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0438 (\u043A\u043E\u0434: ${response?.[PacketDataKeys_default.ERROR] ?? "?"})`
+                    );
+                    return true;
+                  }
+                  return false;
+                };
+                const hqStartedAt = Date.now();
+                let base64 = uploadVariants.hq;
+                let uploadResponse = await sendPhotoPayload(
+                  uploadVariants.hq,
+                  1e3
+                );
+                if (showNonRetryableError(
+                  uploadResponse
+                )) {
+                  return;
+                }
+                let dashboardPacket = uploadResponse?.[PacketDataKeys_default.TYPE] == PacketDataKeys_default.DASHBOARD ? uploadResponse : null;
+                const hqResponseType = uploadResponse?.[PacketDataKeys_default.TYPE];
+                const hqExplicitlyRejected = hqResponseType == PacketDataKeys_default.WRONG_FILE_TYPE || hqResponseType == PacketDataKeys_default.WRONG_FILE_SIZE;
+                if (!hqExplicitlyRejected && !hasChangedPhoto(
+                  dashboardPacket
+                )) {
+                  const remainingMs = 1e3 - (Date.now() - hqStartedAt);
+                  if (remainingMs > 0) {
+                    await new Promise(
+                      (resolve) => window.setTimeout(
+                        resolve,
+                        remainingMs
+                      )
+                    );
+                  }
+                  dashboardPacket = await requestFreshDashboard(
+                    0,
+                    1600
+                  );
+                }
+                if (!hasChangedPhoto(
+                  dashboardPacket
+                )) {
+                  base64 = uploadVariants.compatible;
+                  uploadResponse = await sendPhotoPayload(
+                    uploadVariants.compatible,
+                    3e3
+                  );
+                  if (showNonRetryableError(
+                    uploadResponse
+                  )) {
+                    return;
+                  }
+                  const fallbackResponseType = uploadResponse?.[PacketDataKeys_default.TYPE];
+                  if (fallbackResponseType == PacketDataKeys_default.WRONG_FILE_TYPE) {
+                    MessageBox_default(
+                      "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0444\u043E\u0440\u043C\u0430\u0442 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u044F"
+                    );
+                    return;
+                  }
+                  if (fallbackResponseType == PacketDataKeys_default.WRONG_FILE_SIZE) {
+                    MessageBox_default(
+                      "\u0421\u0435\u0440\u0432\u0435\u0440 \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u043B \u0440\u0430\u0437\u043C\u0435\u0440 \u0444\u043E\u0442\u043E\u0433\u0440\u0430\u0444\u0438\u0438"
+                    );
+                    return;
+                  }
+                  dashboardPacket = fallbackResponseType == PacketDataKeys_default.DASHBOARD ? uploadResponse : null;
+                  if (!hasChangedPhoto(
+                    dashboardPacket
+                  )) {
+                    const pushedDashboard = await App_default.server.awaitPacket(
+                      PacketDataKeys_default.DASHBOARD,
+                      900
+                    ).catch(() => null);
+                    if (pushedDashboard) {
+                      dashboardPacket = pushedDashboard;
+                    }
+                  }
+                  if (!hasChangedPhoto(
+                    dashboardPacket
+                  )) {
+                    for (const delayMs of [
+                      500,
+                      1500
+                    ]) {
+                      const freshDashboard = await requestFreshDashboard(
+                        delayMs
+                      );
+                      if (freshDashboard) {
+                        dashboardPacket = freshDashboard;
+                      }
+                      if (hasChangedPhoto(
+                        dashboardPacket
+                      )) {
+                        break;
+                      }
+                    }
+                  }
                 }
                 const dashboardUser = dashboardPacket?.[PacketDataKeys_default.DASHBOARD]?.[PacketDataKeys_default.DASHBOARD_USER];
                 if (dashboardUser) {
@@ -36182,7 +36326,7 @@ ${e2}`
                 const newPhoto = dashboardUser?.[PacketDataKeys_default.PHOTO];
                 if (!newPhoto || String(newPhoto) === oldPhoto) {
                   MessageBox_default(
-                    "\u0421\u0435\u0440\u0432\u0435\u0440 \u043F\u043E\u043B\u0443\u0447\u0438\u043B \u0437\u0430\u043F\u0440\u043E\u0441, \u043D\u043E \u0444\u043E\u0442\u043E \u043F\u0440\u043E\u0444\u0438\u043B\u044F \u043D\u0435 \u0438\u0437\u043C\u0435\u043D\u0438\u043B\u043E\u0441\u044C."
+                    "\u0421\u0435\u0440\u0432\u0435\u0440 \u043F\u043E\u043B\u0443\u0447\u0438\u043B \u0444\u043E\u0442\u043E, \u043D\u043E \u043F\u0440\u043E\u0444\u0438\u043B\u044C \u043F\u043E\u043A\u0430 \u043D\u0435 \u043E\u0431\u043D\u043E\u0432\u0438\u043B\u0441\u044F. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0447\u0443\u0442\u044C \u043F\u043E\u0437\u0436\u0435."
                   );
                   return;
                 }

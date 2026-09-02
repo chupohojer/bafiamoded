@@ -29,9 +29,14 @@ type AvatarCropShape =
   'circle' |
   'square';
 
+type AvatarUploadVariants = {
+  hq: string;
+  compatible: string;
+};
+
 async function cropAvatarForUpload(
   file: File
-): Promise<string | null> {
+): Promise<AvatarUploadVariants | null> {
   const img =
     await new Promise<HTMLImageElement>(
       (resolve, reject) => {
@@ -241,10 +246,32 @@ async function cropAvatarForUpload(
     const canvas =
       document.createElement('canvas');
 
+    /*
+      Retina/HQ preview:
+      keep all crop math in the same logical 320x320 coordinate space,
+      but give the canvas a denser backing store on iPhone/Retina screens.
+      This changes only how sharp the cropper looks; server upload stays
+      384x384 JPEG quality 0.90.
+    */
+    const previewPixelRatio =
+      Math.min(
+        3,
+        Math.max(
+          1,
+          window.devicePixelRatio || 1
+        )
+      );
+
     canvas.width =
-      cropSize;
+      Math.round(
+        cropSize *
+        previewPixelRatio
+      );
     canvas.height =
-      cropSize;
+      Math.round(
+        cropSize *
+        previewPixelRatio
+      );
 
     canvas.style.width =
       'min(78vw, 320px)';
@@ -271,6 +298,23 @@ async function cropAvatarForUpload(
       resolve(null);
       return;
     }
+
+    /*
+      Draw using logical crop coordinates while the browser renders into the
+      higher-resolution backing store.
+    */
+    ctx.setTransform(
+      previewPixelRatio,
+      0,
+      0,
+      previewPixelRatio,
+      0,
+      0
+    );
+    ctx.imageSmoothingEnabled =
+      true;
+    ctx.imageSmoothingQuality =
+      'high';
 
     const clampOffsets = () => {
       const scale =
@@ -764,7 +808,7 @@ async function cropAvatarForUpload(
     let finished = false;
 
     const finish = (
-      value: string | null
+      value: AvatarUploadVariants | null
     ) => {
       if(finished)
         return;
@@ -793,88 +837,147 @@ async function cropAvatarForUpload(
       clampOffsets();
 
       /*
-        HQ TEST:
-        Export a much larger source than the UI needs. If the final avatar
-        still looks equally compressed after the server round-trip, the
-        remaining quality loss is server-side rather than our cropper.
+        HQ-FIRST + COMPATIBILITY FALLBACK
+
+        Generate BOTH versions from the exact same crop:
+        1) HQ: native crop up to 2048px, JPEG 0.98.
+        2) APK-compatible: 384x384, JPEG 0.90.
+
+        The upload flow below tries HQ first. After about one second it asks
+        Dashboard for server truth; if the photo filename is still unchanged,
+        it automatically sends the proven-compatible 384x384 version.
       */
-      const outputSize = 1024;
-
-      const output =
-        document.createElement('canvas');
-
-      output.width =
-        outputSize;
-      output.height =
-        outputSize;
-
-      const outputCtx =
-        output.getContext('2d');
-
-      if(!outputCtx) {
-        finish(null);
-        return;
-      }
-
-      outputCtx.fillStyle =
-        '#ffffff';
-
-      outputCtx.fillRect(
-        0,
-        0,
-        outputSize,
-        outputSize
-      );
-
       const rect =
         getDrawRect();
 
-      const outputScale =
-        outputSize /
-        cropSize;
+      const imageScale =
+        rect.width /
+        naturalWidth;
 
-      outputCtx.drawImage(
-        img,
-        rect.x * outputScale,
-        rect.y * outputScale,
-        rect.width * outputScale,
-        rect.height * outputScale
-      );
+      const nativeCropSize =
+        cropSize /
+        Math.max(
+          imageScale,
+          0.000001
+        );
 
-      const qualities =
-        [0.96, 0.94, 0.92, 0.90, 0.86];
+      const sourceX =
+        Math.max(
+          0,
+          -rect.x /
+            imageScale
+        );
 
-      let base64 = '';
+      const sourceY =
+        Math.max(
+          0,
+          -rect.y /
+            imageScale
+        );
 
-      for(const quality of qualities) {
+      const sourceSize =
+        Math.min(
+          nativeCropSize,
+          naturalWidth - sourceX,
+          naturalHeight - sourceY
+        );
+
+      const encodeCrop = (
+        outputSize: number,
+        quality: number
+      ) => {
+        const output =
+          document.createElement('canvas');
+
+        output.width =
+          outputSize;
+        output.height =
+          outputSize;
+
+        const outputCtx =
+          output.getContext('2d');
+
+        if(!outputCtx) {
+          return '';
+        }
+
+        outputCtx.imageSmoothingEnabled =
+          true;
+        outputCtx.imageSmoothingQuality =
+          'high';
+
+        outputCtx.fillStyle =
+          '#ffffff';
+
+        outputCtx.fillRect(
+          0,
+          0,
+          outputSize,
+          outputSize
+        );
+
+        outputCtx.drawImage(
+          img,
+          sourceX,
+          sourceY,
+          sourceSize,
+          sourceSize,
+          0,
+          0,
+          outputSize,
+          outputSize
+        );
+
         const dataUrl =
           output.toDataURL(
             'image/jpeg',
             quality
           );
 
-        base64 =
-          dataUrl.split(',')[1] ?? '';
+        return (
+          dataUrl.split(',')[1] ??
+          ''
+        );
+      };
 
-        /*
-          Allow a substantially larger JPEG than v1 (~320k base64 chars).
-          Keep a ceiling so a huge camera photo does not become a multi-MB
-          websocket packet. ~850k base64 chars is roughly ~640 KB binary.
-        */
-        if(
-          base64.length <=
-          850_000
-        ) {
-          break;
-        }
-      }
+      /*
+        2048 is intentionally the HQ ceiling: it is far above the size avatars
+        are displayed at, while avoiding enormous multi-megabyte 48 MP canvas
+        payloads on iPhone Safari.
+      */
+      const hqOutputSize =
+        Math.max(
+          1,
+          Math.min(
+            2048,
+            Math.round(sourceSize)
+          )
+        );
 
-      if(!base64) {
+      const hq =
+        encodeCrop(
+          hqOutputSize,
+          0.98
+        );
+
+      const compatible =
+        encodeCrop(
+          384,
+          0.90
+        );
+
+      if(
+        !hq ||
+        !compatible
+      ) {
         finish(null);
         return;
       }
 
-      finish(base64);
+      finish({
+        hq,
+        compatible
+      });
     };
 
     render();
@@ -1924,10 +2027,12 @@ btnProfile.onclick = () =>
             return;
           }
 
-          let base64: string | null;
+          let uploadVariants:
+            AvatarUploadVariants |
+            null;
 
           try {
-            base64 =
+            uploadVariants =
               await cropAvatarForUpload(
                 file
               );
@@ -1941,7 +2046,7 @@ btnProfile.onclick = () =>
           /*
             User pressed "Отмена" in the cropper.
           */
-          if(!base64) {
+          if(!uploadVariants) {
             return;
           }
 
@@ -1959,61 +2064,112 @@ btnProfile.onclick = () =>
               App.user.photo ?? ''
             );
 
-          const responsePromise =
-            App.server.awaitPacket(
-              [
-                PacketDataKeys.DASHBOARD,
-                PacketDataKeys.UPLOAD_PHOTO,
-                PacketDataKeys.WRONG_FILE_TYPE,
-                PacketDataKeys.WRONG_FILE_SIZE,
-                PacketDataKeys.USER_LEVEL_NOT_ENOUGH,
-                PacketDataKeys.SIGN_IN_ERROR
-              ],
-              3000
-            ).catch(() => null);
-
-          App.server.send(
+          const uploadPacketTypes = [
+            PacketDataKeys.DASHBOARD,
             PacketDataKeys.UPLOAD_PHOTO,
-            {
-              [PacketDataKeys.USER_OBJECT_ID]:
-                App.user.objectId,
+            PacketDataKeys.WRONG_FILE_TYPE,
+            PacketDataKeys.WRONG_FILE_SIZE,
+            PacketDataKeys.USER_LEVEL_NOT_ENOUGH,
+            PacketDataKeys.SIGN_IN_ERROR
+          ];
 
-              [PacketDataKeys.TOKEN]:
-                App.user.token,
+          const sendPhotoPayload =
+            async(
+              payload: string,
+              timeoutMs: number
+            ) => {
+              /*
+                Register the waiter BEFORE send() so a fast response cannot
+                slip past us.
+              */
+              const responsePromise =
+                App.server.awaitPacket(
+                  uploadPacketTypes,
+                  timeoutMs
+                ).catch(() => null);
 
-              [PacketDataKeys.FILE]:
-                base64
-            }
-          );
+              App.server.send(
+                PacketDataKeys.UPLOAD_PHOTO,
+                {
+                  [PacketDataKeys.USER_OBJECT_ID]:
+                    App.user.objectId,
 
-          const uploadResponse =
-            await responsePromise;
+                  [PacketDataKeys.TOKEN]:
+                    App.user.token,
 
-          if(uploadResponse) {
+                  [PacketDataKeys.FILE]:
+                    payload
+                }
+              );
+
+              return await responsePromise;
+            };
+
+          const getDashboardPhoto = (
+            packet: any
+          ) =>
+            packet?.[
+              PacketDataKeys.DASHBOARD
+            ]?.[
+              PacketDataKeys.DASHBOARD_USER
+            ]?.[
+              PacketDataKeys.PHOTO
+            ];
+
+          const hasChangedPhoto = (
+            packet: any
+          ) => {
+            const value =
+              getDashboardPhoto(packet);
+
+            return (
+              value != null &&
+              String(value) !== oldPhoto
+            );
+          };
+
+          const requestFreshDashboard =
+            async(
+              delayMs: number,
+              timeoutMs = 3000
+            ) => {
+              if(delayMs > 0) {
+                await new Promise(
+                  resolve =>
+                    window.setTimeout(
+                      resolve,
+                      delayMs
+                    )
+                );
+              }
+
+              const dashboardPromise =
+                App.server.awaitPacket(
+                  PacketDataKeys.DASHBOARD,
+                  timeoutMs
+                ).catch(() => null);
+
+              App.server.send(
+                PacketDataKeys.ADD_CLIENT_TO_DASHBOARD,
+                {
+                  [PacketDataKeys.USER_OBJECT_ID]:
+                    App.user.objectId,
+
+                  [PacketDataKeys.TOKEN]:
+                    App.user.token
+                }
+              );
+
+              return await dashboardPromise;
+            };
+
+          const showNonRetryableError = (
+            response: any
+          ) => {
             const responseType =
-              uploadResponse[
+              response?.[
                 PacketDataKeys.TYPE
               ];
-
-            if(
-              responseType ==
-              PacketDataKeys.WRONG_FILE_TYPE
-            ) {
-              MessageBox(
-                'Сервер отклонил формат изображения'
-              );
-              return;
-            }
-
-            if(
-              responseType ==
-              PacketDataKeys.WRONG_FILE_SIZE
-            ) {
-              MessageBox(
-                'Сервер отклонил размер фотографии'
-              );
-              return;
-            }
 
             if(
               responseType ==
@@ -2022,7 +2178,7 @@ btnProfile.onclick = () =>
               MessageBox(
                 'Недостаточный уровень для загрузки своей аватарки'
               );
-              return;
+              return true;
             }
 
             if(
@@ -2031,20 +2187,44 @@ btnProfile.onclick = () =>
             ) {
               MessageBox(
                 `Сервер отклонил авторизацию загрузки (код: ${
-                  uploadResponse[
+                  response?.[
                     PacketDataKeys.ERROR
                   ] ?? '?'
                 })`
               );
-              return;
+              return true;
             }
-          }
+
+            return false;
+          };
 
           /*
-            Some server versions answer UPLOAD_PHOTO directly, others simply
-            mutate the account. Ask Dashboard explicitly so we always use
-            server truth after the upload.
+            Stage 1: try the HQ version.
+
+            Give it about one second. A direct size/type rejection immediately
+            goes to the compatibility version. If there is no changed photo in
+            the response, ask Dashboard once for current server truth.
           */
+          const hqStartedAt =
+            Date.now();
+
+          let base64 =
+            uploadVariants.hq;
+
+          let uploadResponse =
+            await sendPhotoPayload(
+              uploadVariants.hq,
+              1000
+            );
+
+          if(
+            showNonRetryableError(
+              uploadResponse
+            )
+          ) {
+            return;
+          }
+
           let dashboardPacket =
             (
               uploadResponse?.[
@@ -2055,31 +2235,151 @@ btnProfile.onclick = () =>
               ? uploadResponse
               : null;
 
-          if(!dashboardPacket) {
-            await new Promise(
-              resolve =>
-                window.setTimeout(
-                  resolve,
-                  250
-                )
-            );
+          const hqResponseType =
+            uploadResponse?.[
+              PacketDataKeys.TYPE
+            ];
 
-            App.server.send(
-              PacketDataKeys.ADD_CLIENT_TO_DASHBOARD,
-              {
-                [PacketDataKeys.USER_OBJECT_ID]:
-                  App.user.objectId,
+          const hqExplicitlyRejected =
+            hqResponseType ==
+              PacketDataKeys.WRONG_FILE_TYPE ||
+            hqResponseType ==
+              PacketDataKeys.WRONG_FILE_SIZE;
 
-                [PacketDataKeys.TOKEN]:
-                  App.user.token
-              }
-            );
+          if(
+            !hqExplicitlyRejected &&
+            !hasChangedPhoto(
+              dashboardPacket
+            )
+          ) {
+            const remainingMs =
+              1000 -
+              (
+                Date.now() -
+                hqStartedAt
+              );
+
+            if(remainingMs > 0) {
+              await new Promise(
+                resolve =>
+                  window.setTimeout(
+                    resolve,
+                    remainingMs
+                  )
+              );
+            }
 
             dashboardPacket =
-              await App.server.awaitPacket(
-                PacketDataKeys.DASHBOARD,
-                2500
-              ).catch(() => null);
+              await requestFreshDashboard(
+                0,
+                1600
+              );
+          }
+
+          /*
+            Stage 2: if HQ still is not the server's current photo, fall back to
+            the exact Android-compatible 384x384 / JPEG 0.90 payload.
+          */
+          if(
+            !hasChangedPhoto(
+              dashboardPacket
+            )
+          ) {
+            base64 =
+              uploadVariants.compatible;
+
+            uploadResponse =
+              await sendPhotoPayload(
+                uploadVariants.compatible,
+                3000
+              );
+
+            if(
+              showNonRetryableError(
+                uploadResponse
+              )
+            ) {
+              return;
+            }
+
+            const fallbackResponseType =
+              uploadResponse?.[
+                PacketDataKeys.TYPE
+              ];
+
+            if(
+              fallbackResponseType ==
+              PacketDataKeys.WRONG_FILE_TYPE
+            ) {
+              MessageBox(
+                'Сервер отклонил формат изображения'
+              );
+              return;
+            }
+
+            if(
+              fallbackResponseType ==
+              PacketDataKeys.WRONG_FILE_SIZE
+            ) {
+              MessageBox(
+                'Сервер отклонил размер фотографии'
+              );
+              return;
+            }
+
+            dashboardPacket =
+              (
+                fallbackResponseType ==
+                PacketDataKeys.DASHBOARD
+              )
+                ? uploadResponse
+                : null;
+
+            if(
+              !hasChangedPhoto(
+                dashboardPacket
+              )
+            ) {
+              const pushedDashboard =
+                await App.server.awaitPacket(
+                  PacketDataKeys.DASHBOARD,
+                  900
+                ).catch(() => null);
+
+              if(pushedDashboard) {
+                dashboardPacket =
+                  pushedDashboard;
+              }
+            }
+
+            if(
+              !hasChangedPhoto(
+                dashboardPacket
+              )
+            ) {
+              for(const delayMs of [
+                500,
+                1500
+              ]) {
+                const freshDashboard =
+                  await requestFreshDashboard(
+                    delayMs
+                  );
+
+                if(freshDashboard) {
+                  dashboardPacket =
+                    freshDashboard;
+                }
+
+                if(
+                  hasChangedPhoto(
+                    dashboardPacket
+                  )
+                ) {
+                  break;
+                }
+              }
+            }
           }
 
           const dashboardUser =
@@ -2111,7 +2411,7 @@ btnProfile.onclick = () =>
             String(newPhoto) === oldPhoto
           ) {
             MessageBox(
-              'Сервер получил запрос, но фото профиля не изменилось.'
+              'Сервер получил фото, но профиль пока не обновился. Попробуй ещё раз чуть позже.'
             );
             return;
           }
